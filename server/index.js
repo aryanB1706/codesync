@@ -1,12 +1,10 @@
-/* server/index.js */
+/* server/index.js - CLEAN VERSION */
 const express = require('express');
 const app = express();
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
-const pty = require('node-pty'); // <--- YE ZAROORI HAI
-const os = require('os');
 require('dotenv').config();
 
 app.use(cors());
@@ -23,31 +21,8 @@ const io = new Server(server, {
 
 const userSocketMap = {};
 
-// Windows ke liye 'powershell.exe', Linux/Render ke liye 'bash'
-const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
-
 io.on('connection', (socket) => {
     console.log('User Connected', socket.id);
-
-    // === TERMINAL LOGIC START ===
-    const ptyProcess = pty.spawn(shell, [], {
-        name: 'xterm-color',
-        cols: 80,
-        rows: 30,
-        cwd: process.env.HOME,
-        env: process.env
-    });
-
-    // Frontend se data aaya -> Terminal me likho
-    socket.on('terminal:write', (data) => {
-        ptyProcess.write(data);
-    });
-
-    // Terminal ne kuch output diya -> Frontend ko bhejo
-    ptyProcess.on('data', (data) => {
-        io.to(socket.id).emit('terminal:data', data);
-    });
-    // === TERMINAL LOGIC END ===
 
     socket.on('join', ({ roomId, username }) => {
         userSocketMap[socket.id] = username;
@@ -62,10 +37,12 @@ io.on('connection', (socket) => {
         });
     });
 
+    // Code Sync
     socket.on('code_change', ({ roomId, code, fileName }) => {
         socket.in(roomId).emit('code_change', { code, fileName }); 
     });
 
+    // File Creation Sync
     socket.on('file_created', ({ roomId, fileName, language, value }) => {
         socket.in(roomId).emit('file_created', { fileName, language, value });
     });
@@ -80,9 +57,6 @@ io.on('connection', (socket) => {
         });
         delete userSocketMap[socket.id];
         socket.leave();
-        
-        // Cleanup: User disconnect hone par process kill karo
-        ptyProcess.kill();
     });
 });
 
@@ -97,20 +71,24 @@ function getAllConnectedClients(roomId) {
     );
 }
 
-// ... /execute route same rahega ...
+// Simple Execute Route
 app.post('/execute', async (req, res) => {
     const { files, mainFile, language } = req.body;
     if (!files || !mainFile || !language) return res.status(400).json({ error: "Missing data" });
+
+    // Piston API Logic
     const orderedFiles = [
         { name: mainFile.name, content: mainFile.value },
         ...files.filter(f => f.name !== mainFile.name).map(f => ({ name: f.name, content: f.value }))
     ];
+
     try {
         const response = await axios.post('https://emkc.org/api/v2/piston/execute', {
             "language": language, "version": "*", "files": orderedFiles
         });
         res.json(response.data);
     } catch (error) {
+        console.error("Exec Error:", error);
         res.status(500).json({ error: "Failed to execute code" });
     }
 });

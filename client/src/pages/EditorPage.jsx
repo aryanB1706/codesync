@@ -4,20 +4,12 @@ import { io } from 'socket.io-client';
 import axios from 'axios';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { Terminal } from 'xterm';
-import { FitAddon } from 'xterm-addon-fit';
-import 'xterm/css/xterm.css'; // Important Style Import
 
 const EditorPage = () => {
     const socketRef = useRef(null);
     const location = useLocation();
     const { roomId } = useParams();
     const navigate = useNavigate();
-    
-    // Terminal Refs
-    const terminalRef = useRef(null);
-    const termInstance = useRef(null);
-    const fitAddon = useRef(null);
 
     // Default files structure
     const [files, setFiles] = useState({
@@ -39,7 +31,9 @@ const EditorPage = () => {
     });
 
     const [activeFileName, setActiveFileName] = useState("script.js");
+    const [output, setOutput] = useState("");
     const [isLoading, setIsLoading] = useState(false);
+    const [isError, setIsError] = useState(false); // Error ko red color dene ke liye
 
     useEffect(() => {
         if (!location.state) {
@@ -47,49 +41,6 @@ const EditorPage = () => {
             navigate('/');
         }
     }, [location.state, navigate]);
-
-    // === TERMINAL INITIALIZATION ===
-    useEffect(() => {
-        if (!terminalRef.current) return;
-
-        // 1. Initialize Xterm
-        const term = new Terminal({
-            cursorBlink: true,
-            theme: {
-                background: '#1e1e1e',
-                foreground: '#cccccc',
-            },
-            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-            fontSize: 14,
-            convertEol: true, // \n ko \r\n me badalta hai (important)
-        });
-
-        // 2. Fit Addon (Taaki terminal size adjust kare)
-        const fit = new FitAddon();
-        term.loadAddon(fit);
-        fitAddon.current = fit;
-
-        // 3. Open Terminal
-        term.open(terminalRef.current);
-        term.write('Welcome to \x1b[1;32mCodeSync Pro\x1b[0m\r\n'); // Green Color text
-        term.write('$ Ready to run code...\r\n');
-        
-        fit.fit();
-        termInstance.current = term;
-        term.onData((data) => {
-            if (socketRef.current) {
-                socketRef.current.emit('terminal:write', data);
-            }
-        });
-
-        // Resize Listener
-        window.addEventListener('resize', () => fit.fit());
-
-        return () => {
-            window.removeEventListener('resize', () => fit.fit());
-            term.dispose();
-        };
-    }, []);
 
     useEffect(() => {
         const initSocket = async () => {
@@ -136,19 +87,10 @@ const EditorPage = () => {
                 });
                 toast.success(`New file created: ${fileName}`);
             });
-            socketRef.current.on('terminal:data', (data) => {
-                if (termInstance.current) {
-                    termInstance.current.write(data);
-                }
-            });
 
             socketRef.current.on('joined', ({ username }) => {
                 if (username !== location.state.username) {
                     toast.success(`${username} joined the room.`);
-                    // Terminal me bhi dikhao
-                    if(termInstance.current) {
-                        termInstance.current.write(`\r\n\x1b[33mSystem: ${username} joined the room.\x1b[0m\r\n$ `);
-                    }
                 }
             });
         };
@@ -205,13 +147,9 @@ const EditorPage = () => {
 
     const runCode = async () => {
         setIsLoading(true);
+        setIsError(false);
         const currentFile = files[activeFileName];
         const filesArray = Object.values(files); 
-
-        // Terminal me likho ki run ho raha hai
-        if (termInstance.current) {
-            termInstance.current.write(`\r\n$ python3 ${activeFileName} (Running...)\r\n`);
-        }
 
         try {
             const response = await axios.post('https://codesync-backend-sj9z.onrender.com/execute', {
@@ -222,27 +160,18 @@ const EditorPage = () => {
 
             const result = response.data.run;
             
-            // Output Terminal me bhejo
-            if (termInstance.current) {
-                if (result.signal) {
-                    // Error (Red Color)
-                    termInstance.current.write(`\x1b[1;31mError: ${result.signal}\x1b[0m\r\n`);
-                } else {
-                    // Success (Green/White)
-                    // Stdout + Stderr ko handle karo
-                    const output = result.output || result.stderr || "No Output";
-                    // New lines ko sahi format karo
-                    const formattedOutput = output.replace(/\n/g, '\r\n');
-                    termInstance.current.write(formattedOutput);
-                }
-                termInstance.current.write('\r\n$ '); // Prompt wapis lao
+            if (result.signal) {
+                setOutput(`Error: ${result.signal}`);
+                setIsError(true);
+            } else {
+                // Stdout + Stderr (Compilation errors also show here usually)
+                setOutput(result.output || result.stderr || "No Output");
+                if (result.stderr) setIsError(true);
             }
-
         } catch (error) {
             console.error(error);
-            if(termInstance.current) {
-                 termInstance.current.write(`\x1b[1;31mFailed to execute code.\x1b[0m\r\n$ `);
-            }
+            setOutput("Error: Failed to execute code.");
+            setIsError(true);
         } finally {
             setIsLoading(false);
         }
@@ -323,22 +252,25 @@ const EditorPage = () => {
                         />
                     </div>
 
-                    {/* Xterm Terminal */}
-                    <div style={{ height: '180px', background: '#1e1e1e', borderTop: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+                    {/* SIMPLE OUTPUT WINDOW (Replacement for Terminal) */}
+                    <div style={{ height: '200px', background: '#1e1e1e', borderTop: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ padding: '5px 15px', fontSize:'11px', color:'#aaa', borderBottom:'1px solid #2d2d2d', fontWeight:'bold', display:'flex', justifyContent:'space-between' }}>
-                            <span>TERMINAL</span>
-                            <span 
-                                onClick={() => termInstance.current?.clear()} 
-                                style={{cursor:'pointer', color:'#fff'}}>
-                                🗑️ Clear
-                            </span>
+                            <span>OUTPUT</span>
+                            {output && <span onClick={() => setOutput("")} style={{cursor:'pointer', color:'#fff'}}>🗑️ Clear</span>}
                         </div>
                         
-                        {/* Ye div Xterm mount karega */}
-                        <div 
-                            ref={terminalRef} 
-                            style={{ flex: 1, padding: '5px 0 0 10px', overflow: 'hidden' }}
-                        ></div>
+                        <pre style={{ 
+                            flex: 1, 
+                            padding: '10px 15px', 
+                            margin: 0,
+                            fontFamily: "'Fira Code', monospace", 
+                            fontSize: '14px',
+                            color: isError ? '#f87171' : '#a7f3d0', // Red for error, Greenish for success
+                            whiteSpace: 'pre-wrap', // Wraps text properly
+                            overflowY: 'auto'
+                        }}>
+                            {output || <span style={{color:'#555', fontStyle:'italic'}}>Run code to see output here...</span>}
+                        </pre>
                     </div>
                 </div>
             </div>
