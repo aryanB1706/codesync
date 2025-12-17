@@ -1,10 +1,11 @@
+/* server/index.js */
 const express = require('express');
 const app = express();
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
-const pty = require('node-pty'); // Asli Terminal Library
+const pty = require('node-pty'); // <--- YE ZAROORI HAI
 const os = require('os');
 require('dotenv').config();
 
@@ -22,32 +23,31 @@ const io = new Server(server, {
 
 const userSocketMap = {};
 
-// Terminal Shell determine karo (Windows ke liye PowerShell, Linux ke liye Bash)
+// Windows ke liye 'powershell.exe', Linux/Render ke liye 'bash'
 const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
 
 io.on('connection', (socket) => {
     console.log('User Connected', socket.id);
 
-    // === REAL TERMINAL LOGIC START ===
-    // Har user ke liye ek naya terminal process spawn karo
+    // === TERMINAL LOGIC START ===
     const ptyProcess = pty.spawn(shell, [], {
         name: 'xterm-color',
         cols: 80,
         rows: 30,
-        cwd: process.env.HOME, // Server ke Home folder me start hoga
+        cwd: process.env.HOME,
         env: process.env
     });
 
-    // Frontend se input aaya (User ne type kiya) -> Terminal me likho
+    // Frontend se data aaya -> Terminal me likho
     socket.on('terminal:write', (data) => {
         ptyProcess.write(data);
     });
 
-    // Terminal se output aaya (Result) -> Frontend ko bhejo
+    // Terminal ne kuch output diya -> Frontend ko bhejo
     ptyProcess.on('data', (data) => {
         io.to(socket.id).emit('terminal:data', data);
     });
-    // === REAL TERMINAL LOGIC END ===
+    // === TERMINAL LOGIC END ===
 
     socket.on('join', ({ roomId, username }) => {
         userSocketMap[socket.id] = username;
@@ -81,7 +81,7 @@ io.on('connection', (socket) => {
         delete userSocketMap[socket.id];
         socket.leave();
         
-        // Cleanup: User gaya toh Terminal bhi band karo
+        // Cleanup: User disconnect hone par process kill karo
         ptyProcess.kill();
     });
 });
@@ -97,27 +97,20 @@ function getAllConnectedClients(roomId) {
     );
 }
 
+// ... /execute route same rahega ...
 app.post('/execute', async (req, res) => {
     const { files, mainFile, language } = req.body;
-    if (!files || !mainFile || !language) {
-        return res.status(400).json({ error: "Files or language missing" });
-    }
+    if (!files || !mainFile || !language) return res.status(400).json({ error: "Missing data" });
     const orderedFiles = [
         { name: mainFile.name, content: mainFile.value },
-        ...files.filter(f => f.name !== mainFile.name).map(f => ({
-            name: f.name,
-            content: f.value
-        }))
+        ...files.filter(f => f.name !== mainFile.name).map(f => ({ name: f.name, content: f.value }))
     ];
     try {
         const response = await axios.post('https://emkc.org/api/v2/piston/execute', {
-            "language": language,
-            "version": "*",
-            "files": orderedFiles
+            "language": language, "version": "*", "files": orderedFiles
         });
         res.json(response.data);
     } catch (error) {
-        console.error("Error executing code:", error);
         res.status(500).json({ error: "Failed to execute code" });
     }
 });
