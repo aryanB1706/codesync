@@ -10,10 +10,28 @@ const EditorPage = () => {
     const location = useLocation();
     const { roomId } = useParams();
     const navigate = useNavigate();
-    
-    const [code, setCode] = useState("// Write your code here...");
+
+    // Default file structure
+    const [files, setFiles] = useState({
+        "script.js": {
+            name: "script.js",
+            language: "javascript",
+            value: "// Write your JS code here\nconsole.log('Hello World');"
+        },
+        "style.css": {
+            name: "style.css",
+            language: "css",
+            value: "/* Write your CSS code here */\nbody { background: #000; }"
+        },
+        "index.html": {
+            name: "index.html",
+            language: "html",
+            value: "\n<div></div>"
+        }
+    });
+
+    const [activeFileName, setActiveFileName] = useState("script.js");
     const [output, setOutput] = useState("");
-    const [language, setLanguage] = useState("javascript");
     const [isLoading, setIsLoading] = useState(false);
 
     useEffect(() => {
@@ -24,18 +42,16 @@ const EditorPage = () => {
     }, [location.state, navigate]);
 
     useEffect(() => {
-        // === MOBILE FIX START ===
         const initSocket = async () => {
+            // NOTE: Agar tumhara Backend URL alag hai toh yahan replace karna
             socketRef.current = io('https://codesync-backend-sj9z.onrender.com', {
-                // Mobile networks ke liye polling zaroori hai
-                transports: ['websocket', 'polling', 'flashsocket'], 
+                transports: ['websocket', 'polling'],
                 reconnectionAttempts: 5,
                 reconnectionDelay: 1000,
-                forceNew: true, // Har baar naya connection force karo
+                forceNew: true,
                 timeout: 10000,
             });
 
-            // Error Handling
             socketRef.current.on('connect_error', (err) => handleErrors(err));
             socketRef.current.on('connect_failed', (err) => handleErrors(err));
 
@@ -45,58 +61,82 @@ const EditorPage = () => {
                 navigate('/');
             }
 
-            // Room Join
             socketRef.current.emit('join', {
                 roomId,
                 username: location.state?.username,
             });
 
-            // Listen for Code Changes
-            socketRef.current.on('code_change', ({ code }) => {
-                if (code !== null) {
-                    setCode(code);
-                }
+            socketRef.current.on('code_change', ({ fileName, code }) => {
+                setFiles((prevFiles) => {
+                    if (prevFiles[fileName]) {
+                        return {
+                            ...prevFiles,
+                            [fileName]: { ...prevFiles[fileName], value: code }
+                        };
+                    }
+                    return prevFiles;
+                });
             });
 
-            // Listen for New User Join
-            socketRef.current.on('joined', ({ username, socketId }) => {
+            socketRef.current.on('joined', ({ username }) => {
                 if (username !== location.state.username) {
                     toast.success(`${username} joined the room.`);
-                    // OPTIONAL: Sync code on join (Jo pehle se room me hai wo apna code nayi user ko bheje)
-                    // socketRef.current.emit('sync_code', { code: codeRef.current, socketId });
                 }
             });
         };
 
         initSocket();
-        // === MOBILE FIX END ===
 
         return () => {
-            // Cleanup: Component unmount hone par disconnect karo
-            if (socketRef.current) {
-                socketRef.current.disconnect();
-                socketRef.current.off('code_change');
-                socketRef.current.off('joined');
-            }
+            if (socketRef.current) socketRef.current.disconnect();
         };
     }, []);
 
     const handleEditorChange = (value) => {
-        setCode(value);
+        setFiles((prev) => ({
+            ...prev,
+            [activeFileName]: { ...prev[activeFileName], value: value }
+        }));
+
         if (socketRef.current) {
             socketRef.current.emit('code_change', {
                 roomId,
+                fileName: activeFileName,
                 code: value,
             });
         }
     };
 
+    const createNewFile = () => {
+        const fileName = prompt("Enter file name (e.g., app.py):");
+        if (!fileName) return;
+        if (files[fileName]) {
+            toast.error("File already exists!");
+            return;
+        }
+
+        let lang = "javascript";
+        if (fileName.endsWith(".py")) lang = "python";
+        if (fileName.endsWith(".java")) lang = "java";
+        if (fileName.endsWith(".cpp")) lang = "cpp";
+        if (fileName.endsWith(".css")) lang = "css";
+        if (fileName.endsWith(".html")) lang = "html";
+
+        setFiles((prev) => ({
+            ...prev,
+            [fileName]: { name: fileName, language: lang, value: `// New file: ${fileName}` }
+        }));
+        setActiveFileName(fileName);
+        toast.success("File created!");
+    };
+
     const runCode = async () => {
         setIsLoading(true);
+        const currentFile = files[activeFileName];
         try {
             const response = await axios.post('https://codesync-backend-sj9z.onrender.com/execute', {
-                code: code,
-                language: language
+                code: currentFile.value,
+                language: currentFile.language
             });
             const result = response.data.run;
             setOutput(result.output || "No Output");
@@ -108,68 +148,154 @@ const EditorPage = () => {
         }
     };
 
-    if (!location.state) {
-        return null; 
-    }
+    if (!location.state) return null;
+    const file = files[activeFileName];
+
+    // Helper to get icon based on extension
+    const getFileIcon = (name) => {
+        if (name.endsWith('.html')) return '🌐';
+        if (name.endsWith('.css')) return '🎨';
+        if (name.endsWith('.js')) return '📜';
+        if (name.endsWith('.py')) return '🐍';
+        if (name.endsWith('.cpp')) return '⚙️';
+        return '📄';
+    };
 
     return (
-        <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#0d0d0d' }}>
-            <div style={{ padding: '10px', background: '#1e1e1e', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                    <span style={{ fontWeight: 'bold', color: '#4aed88' }}>CodeSync</span> 
-                    <span style={{ marginLeft: '10px', fontSize: '14px', color: '#888' }}>Room: {roomId}</span>
+        <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#1e1e1e', overflow: 'hidden' }}>
+            
+            {/* === HEADER === */}
+            <div style={{ 
+                height: '50px', 
+                background: '#333333', 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'center', 
+                padding: '0 15px',
+                borderBottom: '1px solid #252526'
+            }}>
+                <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
+                    <div style={{ background:'#4aed88', width:'20px', height:'20px', borderRadius:'4px'}}></div>
+                    <span style={{ fontWeight: '600', color: '#ccc', letterSpacing:'1px' }}>CodeSync Pro</span>
                 </div>
                 <div style={{ display: 'flex', gap: '10px' }}>
-                    <select
-                        value={language}
-                        onChange={(e) => setLanguage(e.target.value)}
-                        style={{ padding: '5px', borderRadius: '4px' }}
-                    >
-                        <option value="javascript">JavaScript</option>
-                        <option value="python">Python</option>
-                        <option value="cpp">C++</option>
-                        <option value="java">Java</option>
-                    </select>
-                    <button
-                        onClick={runCode}
-                        disabled={isLoading}
-                        style={{
-                            padding: '5px 15px',
-                            background: '#28a745',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer'
-                        }}
-                    >
-                        {isLoading ? "Running..." : "Run Code ▶"}
+                     <span style={{ color: '#888', fontSize:'12px', display:'flex', alignItems:'center', marginRight:'10px' }}>
+                        Room: {roomId}
+                    </span>
+                    <button onClick={runCode} disabled={isLoading} style={{ padding: '6px 15px', background: isLoading ? '#555' : '#0e639c', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight:'bold', display:'flex', alignItems:'center', gap:'5px' }}>
+                        {isLoading ? "Running..." : "▶ Run"}
                     </button>
-                    <button 
-                        onClick={() => {
-                            navigator.clipboard.writeText(roomId);
-                            toast.success('Room ID copied');
-                        }}
-                        style={{ background: '#444', color: '#fff', border: 'none', padding: '5px 10px', borderRadius: '4px', cursor: 'pointer'}}
-                    >
+                    <button onClick={() => { navigator.clipboard.writeText(roomId); toast.success('Room ID copied'); }} style={{ background: '#444', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>
                         Copy ID
                     </button>
                 </div>
             </div>
 
-            <div style={{ display: 'flex', flex: 1 }}>
-                <div style={{ flex: 2, borderRight: '1px solid #333' }}>
-                    <Editor
-                        height="100%"
-                        theme="vs-dark"
-                        language={language}
-                        value={code}
-                        onChange={handleEditorChange}
-                        options={{ minimap: { enabled: false }, fontSize: 16 }}
-                    />
+            {/* === MAIN WORKSPACE === */}
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+                
+                {/* === SIDEBAR === */}
+                <div style={{ 
+                    width: '240px', 
+                    background: '#252526', 
+                    borderRight: '1px solid #333', 
+                    display: 'flex', 
+                    flexDirection: 'column' 
+                }}>
+                    <div style={{ padding: '10px 15px', color:'#bbb', fontSize:'11px', fontWeight:'bold', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                        <span>EXPLORER</span>
+                        <button onClick={createNewFile} style={{ background:'none', border:'none', color:'#ccc', cursor:'pointer', fontSize:'16px' }} title="New File">+</button>
+                    </div>
+                    
+                    <div style={{ flex: 1, overflowY: 'auto' }}>
+                        {Object.keys(files).map((fileName) => (
+                            <div 
+                                key={fileName}
+                                onClick={() => setActiveFileName(fileName)}
+                                style={{
+                                    padding: '6px 15px',
+                                    cursor: 'pointer',
+                                    background: activeFileName === fileName ? '#37373d' : 'transparent',
+                                    color: activeFileName === fileName ? '#fff' : '#9d9d9d',
+                                    display: 'flex', alignItems: 'center', gap: '8px',
+                                    fontSize: '14px',
+                                    borderLeft: activeFileName === fileName ? '3px solid #4aed88' : '3px solid transparent'
+                                }}
+                            >
+                                <span>{getFileIcon(fileName)}</span> {fileName}
+                            </div>
+                        ))}
+                    </div>
                 </div>
-                <div style={{ flex: 1, background: '#1e1e1e', color: '#0f0', padding: '10px', fontFamily: 'monospace', overflowY: 'auto' }}>
-                    <h4 style={{ marginTop: 0, color: '#888' }}>Output:</h4>
-                    <pre style={{ whiteSpace: 'pre-wrap' }}>{output}</pre>
+
+                {/* === EDITOR & TERMINAL AREA === */}
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#1e1e1e' }}>
+                    
+                    {/* File Tab */}
+                    <div style={{ 
+                        height: '35px', 
+                        background: '#1e1e1e', 
+                        display: 'flex',
+                        borderBottom: '1px solid #333'
+                    }}>
+                        <div style={{ 
+                            padding: '0 15px', 
+                            background: '#1e1e1e', 
+                            color: '#fff', 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            borderTop: '2px solid #4aed88',
+                            fontSize: '13px',
+                            gap: '8px'
+                        }}>
+                             {getFileIcon(activeFileName)} {activeFileName}
+                        </div>
+                    </div>
+
+                    {/* Monaco Editor */}
+                    <div style={{ flex: 1, position: 'relative' }}>
+                        <Editor
+                            height="100%" 
+                            width="100%"
+                            theme="vs-dark"
+                            path={file.name} 
+                            defaultLanguage={file.language}
+                            defaultValue={file.value}
+                            value={file.value}
+                            onChange={handleEditorChange}
+                            options={{ 
+                                minimap: { enabled: false }, 
+                                fontSize: 14,
+                                scrollBeyondLastLine: false,
+                                automaticLayout: true, // IMPORTANT: Fixes layout issues
+                            }}
+                        />
+                    </div>
+
+                    {/* Terminal / Output */}
+                    <div style={{ 
+                        height: '150px', 
+                        background: '#1e1e1e', 
+                        borderTop: '1px solid #333',
+                        display: 'flex',
+                        flexDirection: 'column'
+                    }}>
+                        <div style={{ padding: '5px 15px', fontSize:'11px', color:'#aaa', borderBottom:'1px solid #2d2d2d', fontWeight:'bold' }}>
+                            TERMINAL / OUTPUT
+                        </div>
+                        <pre style={{ 
+                            margin: 0, 
+                            padding: '10px 15px', 
+                            fontFamily: 'monospace', 
+                            fontSize: '13px',
+                            color: output.includes('Error') ? '#f14c4c' : '#ccc', 
+                            whiteSpace: 'pre-wrap',
+                            overflowY: 'auto',
+                            flex: 1
+                        }}>
+                            {output || "> Ready to execute..."}
+                        </pre>
+                    </div>
                 </div>
             </div>
         </div>

@@ -40,9 +40,13 @@ io.on('connection', (socket) => {
     });
 
     // Jab code change ho
-    socket.on('code_change', ({ roomId, code }) => {
+    socket.on('code_change', ({ roomId, code ,fileName}) => {
         // Sender ko chhod ke baaki sabko code bhejo
-        socket.in(roomId).emit('code_change', { code }); 
+        socket.in(roomId).emit('code_change', { code,fileName }); 
+    });
+    socket.on('file_created', ({ roomId, fileName, language, value }) => {
+        // Baaki sabko batao ki nayi file bani hai
+        socket.in(roomId).emit('file_created', { fileName, language, value });
     });
 
     // Jab user disconnect ho
