@@ -24,45 +24,60 @@ const EditorPage = () => {
     }, [location.state, navigate]);
 
     useEffect(() => {
-        // === FIX 1: Add socket options for Render deployment ===
-        const BACKEND_URL = 'https://codesync-backend-sj9z.onrender.com';
-        
-        socketRef.current = io(BACKEND_URL, {
-            transports: ['websocket'], // <--- IMPORTANT: Force WebSocket transport
-            reconnectionAttempts: 5,   // Retry connection
-            timeout: 10000,            // Increase timeout
-        });
+        // === MOBILE FIX START ===
+        const initSocket = async () => {
+            socketRef.current = io('https://codesync-backend-sj9z.onrender.com', {
+                // Mobile networks ke liye polling zaroori hai
+                transports: ['websocket', 'polling', 'flashsocket'], 
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000,
+                forceNew: true, // Har baar naya connection force karo
+                timeout: 10000,
+            });
 
-        socketRef.current.on('connect_error', (err) => handleErrors(err));
-        socketRef.current.on('connect_failed', (err) => handleErrors(err));
+            // Error Handling
+            socketRef.current.on('connect_error', (err) => handleErrors(err));
+            socketRef.current.on('connect_failed', (err) => handleErrors(err));
 
-        function handleErrors(e) {
-            console.log('socket error', e);
-            toast.error('Socket connection failed, try again later.');
-            navigate('/');
-        }
+            function handleErrors(e) {
+                console.log('socket error', e);
+                toast.error('Socket connection failed, try again later.');
+                navigate('/');
+            }
 
-        if (location.state && location.state.username) {
+            // Room Join
             socketRef.current.emit('join', {
                 roomId,
-                username: location.state.username,
+                username: location.state?.username,
             });
-        }
 
-        socketRef.current.on('code_change', ({ code }) => {
-            if (code !== null) {
-                setCode(code);
-            }
-        });
+            // Listen for Code Changes
+            socketRef.current.on('code_change', ({ code }) => {
+                if (code !== null) {
+                    setCode(code);
+                }
+            });
 
-        socketRef.current.on('joined', ({ username, socketId }) => {
-            if (username !== location.state.username) {
-                toast.success(`${username} joined the room.`);
-            }
-        });
+            // Listen for New User Join
+            socketRef.current.on('joined', ({ username, socketId }) => {
+                if (username !== location.state.username) {
+                    toast.success(`${username} joined the room.`);
+                    // OPTIONAL: Sync code on join (Jo pehle se room me hai wo apna code nayi user ko bheje)
+                    // socketRef.current.emit('sync_code', { code: codeRef.current, socketId });
+                }
+            });
+        };
+
+        initSocket();
+        // === MOBILE FIX END ===
 
         return () => {
-            socketRef.current.disconnect();
+            // Cleanup: Component unmount hone par disconnect karo
+            if (socketRef.current) {
+                socketRef.current.disconnect();
+                socketRef.current.off('code_change');
+                socketRef.current.off('joined');
+            }
         };
     }, []);
 
@@ -79,7 +94,6 @@ const EditorPage = () => {
     const runCode = async () => {
         setIsLoading(true);
         try {
-            // === FIX 2: Added '/execute' to the URL ===
             const response = await axios.post('https://codesync-backend-sj9z.onrender.com/execute', {
                 code: code,
                 language: language
