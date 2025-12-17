@@ -1,0 +1,163 @@
+/* Import Google Font for better look */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+* {
+    box-sizing: border-box;
+    font-family: 'Inter', sans-serif;
+}
+
+body, html {
+    margin: 0;
+    padding: 0;
+    background: #0d0d0d; /* Deep Black Background */
+    color: #fff;
+    height: 100vh;
+}
+
+/* --- HOME PAGE STYLES --- */
+
+.homePageWrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    height: 100vh;
+    background-color: #0a0a0a;
+    background-image: radial-gradient(circle at 50% 50%, #1a1a1a 0%, #0a0a0a 100%);
+}
+
+.formWrapper {
+    background: #1c1e29; /* Editor jaisa Dark Gray */
+    padding: 30px;
+    border-radius: 15px;
+    width: 450px;
+    max-width: 90%;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5); /* Heavy shadow for depth */
+    border: 1px solid #333;
+    animation: fadeIn 0.5s ease-in-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.logoWrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 25px;
+    gap: 10px;
+}
+
+.homePageLogo {
+    height: 50px;
+    filter: drop-shadow(0 0 10px rgba(74, 237, 136, 0.4)); /* Glow effect */
+}
+
+.appName {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 700;
+    color: #eee;
+}
+
+.mainLabel {
+    margin-bottom: 20px;
+    margin-top: 0;
+    color: #888;
+    font-weight: 600;
+}
+
+.inputGroup {
+    display: flex;
+    flex-direction: column;
+}
+
+.inputBox {
+    padding: 12px 15px;
+    border-radius: 8px;
+    outline: none;
+    border: 1px solid #333;
+    margin-bottom: 15px;
+    background: #282a36; /* Input Background */
+    color: #eee;
+    font-size: 16px;
+    font-weight: 600;
+    transition: all 0.3s ease;
+}
+
+.inputBox:focus {
+    border-color: #4aed88; /* Green Border on Focus */
+    box-shadow: 0 0 5px rgba(74, 237, 136, 0.2);
+}
+
+.btn {
+    border: none;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.3s ease-in-out;
+}
+
+.joinBtn {
+    background: #4aed88; /* Professional Neon Green */
+    color: #1c1e29; /* Dark Text */
+    margin-top: 10px;
+}
+
+.joinBtn:hover {
+    background: #36c570;
+    transform: scale(1.02); /* Slight zoom effect */
+}
+
+.createInfo {
+    margin: 0 auto;
+    margin-top: 20px;
+    color: #888;
+    font-size: 14px;
+}
+
+.createNewBtn {
+    color: #4aed88;
+    text-decoration: none;
+    border-bottom: 1px solid #4aed88;
+    transition: all 0.3s ease-in-out;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.createNewBtn:hover {
+    color: #36c570;
+    border-color: #36c570;
+}
+
+footer {
+    position: fixed;
+    bottom: 10px;
+    text-align: center;
+    width: 100%;
+}
+
+footer h4 {
+    color: #555;
+    font-weight: 400;
+    font-size: 14px;
+}
+
+footer a {
+    color: #4aed88;
+    text-decoration: none;
+}
+.homePageWrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100vw;   /* Pura width lega */
+    height: 100vh;  /* Pura height lega */
+    background-color: #0a0a0a;
+    /* Optional: Background pattern */
+    background-image: radial-gradient(circle at 50% 50%, #1a1a1a 0%, #0a0a0a 100%);
+}
