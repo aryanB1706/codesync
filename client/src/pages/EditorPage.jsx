@@ -26,7 +26,7 @@ const EditorPage = () => {
 
     useEffect(() => {
         // Socket Connection Initialize
-        socketRef.current = io('http://localhost:5000');
+        socketRef.current = io('https://codesync-backend-sj9z.onrender.com');
 
         // Connection Error Handling
         socketRef.current.on('connect_error', (err) => handleErrors(err));
@@ -82,7 +82,7 @@ const EditorPage = () => {
     const runCode = async () => {
         setIsLoading(true);
         try {
-            const response = await axios.post('http://localhost:5000/execute', {
+            const response = await axios.post('https://codesync-backend-sj9z.onrender.com', {
                 code: code,
                 language: language
             });

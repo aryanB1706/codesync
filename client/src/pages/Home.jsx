@@ -80,7 +80,7 @@ const Home = () => {
             </div>
             
             <footer>
-                <h4>Built with 💛 by <a href="https://github.com/your-username">Your Name</a></h4>
+                <h4>Built with 💛 by <a href="https://github.com/aryanB1706">Your Name</a></h4>
             </footer>
         </div>
     );
