@@ -6,7 +6,7 @@ const cors = require('cors');
 const axios = require('axios');
 const pty = require('node-pty'); // Asli Terminal Library
 const os = require('os');
-require('dotenv').config();
+//require('dotenv').config();
 
 app.use(cors());
 app.use(express.json());
