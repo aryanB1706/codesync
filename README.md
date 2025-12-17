@@ -7,7 +7,7 @@
 
 > **A real-time collaborative coding platform for pair programming and technical interviews.**
 
-**🔗 Live Demo:** [INSERT YOUR VERCEL/DEPLOYMENT LINK HERE]
+**🔗 Live Demo:** https://codesync-topaz-two.vercel.app/
 
 ---
 
@@ -53,17 +53,7 @@ The application follows a standard Client-Server architecture powered by **Socke
 | **API** | Piston API (for code execution) |
 | **Deployment** | Vercel (Frontend), Render/Railway (Backend) |
 
----
 
-## 📸 Screenshots
-
-| Landing Page | Collaborative Editor |
-| :---: | :---: |
-| ![Landing](./screenshots/landing.png) | ![Editor](./screenshots/editor.png) |
-
-*(Note: Create a folder named `screenshots` in your repo and add your images there)*
-
----
 
 ## 🚀 Getting Started
 
