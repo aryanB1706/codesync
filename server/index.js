@@ -46,6 +46,10 @@ io.on('connection', (socket) => {
     socket.on('file_created', ({ roomId, fileName, language, value }) => {
         socket.in(roomId).emit('file_created', { fileName, language, value });
     });
+    socket.on('file_deleted', ({ roomId, id }) => {
+        // 'id' yahan file ka path/naam hai
+        socket.in(roomId).emit('file_deleted', { id }); 
+    });
 
     socket.on('disconnecting', () => {
         const rooms = [...socket.rooms];
