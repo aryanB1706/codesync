@@ -155,25 +155,35 @@ const EditorPage = () => {
   };
 
   const runCode = async () => {
-    setIsLoading(true);
-    const currentFile = files[activeFileName];
-    try {
-      const response = await axios.post(
-        "https://codesync-backend-sj9z.onrender.com/execute",
-        {
-          code: currentFile.value,
-          language: currentFile.language,
+        setIsLoading(true);
+        const currentFile = files[activeFileName];
+        
+        // Convert 'files' object to array
+        const filesArray = Object.values(files);
+
+        try {
+            const response = await axios.post('https://codesync-backend-sj9z.onrender.com/execute', {
+                files: filesArray,          // Saari files bhej rahe hain
+                mainFile: currentFile,      // Bata rahe hain ki abhi kaunsi file run karni hai
+                language: currentFile.language
+            });
+
+            const result = response.data.run;
+            
+            // Output handle karo
+            if (result.signal) {
+                setOutput(`Error: ${result.signal}`);
+            } else {
+                // Stdout (Normal output) + Stderr (Errors) combine karke dikhao
+                setOutput(result.output || result.stderr || "No Output");
+            }
+        } catch (error) {
+            console.error(error);
+            setOutput("Error: Failed to execute code. Server might be busy.");
+        } finally {
+            setIsLoading(false);
         }
-      );
-      const result = response.data.run;
-      setOutput(result.output || "No Output");
-    } catch (error) {
-      console.error(error);
-      setOutput("Error: Failed to execute code.");
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    };
 
   if (!location.state) return null;
   const file = files[activeFileName];
