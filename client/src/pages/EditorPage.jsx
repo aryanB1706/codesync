@@ -8,7 +8,7 @@ import toast from 'react-hot-toast';
 const EditorPage = () => {
     const socketRef = useRef(null);
     const location = useLocation();
-    const { roomId } = useParams(); // URL se Room ID milega
+    const { roomId } = useParams();
     const navigate = useNavigate();
     
     const [code, setCode] = useState("// Write your code here...");
@@ -16,7 +16,6 @@ const EditorPage = () => {
     const [language, setLanguage] = useState("javascript");
     const [isLoading, setIsLoading] = useState(false);
 
-    // Agar username nahi hai toh Home page pe bhejo
     useEffect(() => {
         if (!location.state) {
             toast.error("Username is required");
@@ -25,10 +24,15 @@ const EditorPage = () => {
     }, [location.state, navigate]);
 
     useEffect(() => {
-        // Socket Connection Initialize
-        socketRef.current = io('https://codesync-backend-sj9z.onrender.com');
+        // === FIX 1: Add socket options for Render deployment ===
+        const BACKEND_URL = 'https://codesync-backend-sj9z.onrender.com';
+        
+        socketRef.current = io(BACKEND_URL, {
+            transports: ['websocket'], // <--- IMPORTANT: Force WebSocket transport
+            reconnectionAttempts: 5,   // Retry connection
+            timeout: 10000,            // Increase timeout
+        });
 
-        // Connection Error Handling
         socketRef.current.on('connect_error', (err) => handleErrors(err));
         socketRef.current.on('connect_failed', (err) => handleErrors(err));
 
@@ -38,7 +42,6 @@ const EditorPage = () => {
             navigate('/');
         }
 
-        // JOIN EVENT EMIT KARO
         if (location.state && location.state.username) {
             socketRef.current.emit('join', {
                 roomId,
@@ -46,31 +49,25 @@ const EditorPage = () => {
             });
         }
 
-        // LISTEN FOR INCOMING CODE
         socketRef.current.on('code_change', ({ code }) => {
-            console.log("Code received from server:", code); // Debugging log
             if (code !== null) {
                 setCode(code);
             }
         });
 
-        // LISTEN FOR JOINED EVENT (Optional: To verify connection)
         socketRef.current.on('joined', ({ username, socketId }) => {
             if (username !== location.state.username) {
                 toast.success(`${username} joined the room.`);
             }
         });
 
-        // Cleanup on unmount
         return () => {
             socketRef.current.disconnect();
         };
-    }, []); // Empty dependency array ensures this runs once
+    }, []);
 
-    // EDITOR CHANGE HANDLER
     const handleEditorChange = (value) => {
         setCode(value);
-        // Code change server ko bhejo
         if (socketRef.current) {
             socketRef.current.emit('code_change', {
                 roomId,
@@ -82,7 +79,8 @@ const EditorPage = () => {
     const runCode = async () => {
         setIsLoading(true);
         try {
-            const response = await axios.post('https://codesync-backend-sj9z.onrender.com', {
+            // === FIX 2: Added '/execute' to the URL ===
+            const response = await axios.post('https://codesync-backend-sj9z.onrender.com/execute', {
                 code: code,
                 language: language
             });
@@ -96,7 +94,6 @@ const EditorPage = () => {
         }
     };
 
-    // Agar username nahi hai toh UI mat dikhao (redirect ho raha hoga)
     if (!location.state) {
         return null; 
     }
