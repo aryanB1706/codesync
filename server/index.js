@@ -75,21 +75,29 @@ function getAllConnectedClients(roomId) {
     );
 }
 app.post('/execute', async (req, res) => {
-    const { code, language } = req.body;
+    // Ab hum 'code' nahi, 'files' array expect karenge
+    const { files, mainFile, language } = req.body;
 
-    // Piston API ko request bhejo
+    if (!files || !mainFile || !language) {
+        return res.status(400).json({ error: "Files or language missing" });
+    }
+
+    // Piston API ko batana padta hai ki kaunsi file pehle run karni hai.
+    // Hum 'mainFile' ko array me sabse upar rakhenge.
+    const orderedFiles = [
+        { name: mainFile.name, content: mainFile.value }, // Entry point
+        ...files.filter(f => f.name !== mainFile.name).map(f => ({
+            name: f.name,
+            content: f.value
+        }))
+    ];
+
     try {
         const response = await axios.post('https://emkc.org/api/v2/piston/execute', {
             "language": language,
             "version": "*",
-            "files": [
-                {
-                    "content": code
-                }
-            ]
+            "files": orderedFiles // <--- Ab hum poora bundle bhej rahe hain
         });
-        
-        // Output bhejo frontend ko
         res.json(response.data);
     } catch (error) {
         console.error("Error executing code:", error);
