@@ -5,6 +5,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
+const socketHandler = require('./socket/socketHandler');
 require('dotenv').config();
 
 app.use(cors());
@@ -19,61 +20,9 @@ const io = new Server(server, {
     },
 });
 
-const userSocketMap = {};
-
 io.on('connection', (socket) => {
-    console.log('User Connected', socket.id);
-
-    socket.on('join', ({ roomId, username }) => {
-        userSocketMap[socket.id] = username;
-        socket.join(roomId);
-        const clients = getAllConnectedClients(roomId);
-        clients.forEach(({ socketId }) => {
-            io.to(socketId).emit('joined', {
-                clients,
-                username,
-                socketId: socket.id,
-            });
-        });
-    });
-
-    // Code Sync
-    socket.on('code_change', ({ roomId, code, fileName }) => {
-        socket.in(roomId).emit('code_change', { code, fileName }); 
-    });
-
-    // File Creation Sync
-    socket.on('file_created', ({ roomId, fileName, language, value }) => {
-        socket.in(roomId).emit('file_created', { fileName, language, value });
-    });
-    socket.on('file_deleted', ({ roomId, id }) => {
-        // 'id' yahan file ka path/naam hai
-        socket.in(roomId).emit('file_deleted', { id }); 
-    });
-
-    socket.on('disconnecting', () => {
-        const rooms = [...socket.rooms];
-        rooms.forEach((roomId) => {
-            socket.in(roomId).emit('disconnected', {
-                socketId: socket.id,
-                username: userSocketMap[socket.id],
-            });
-        });
-        delete userSocketMap[socket.id];
-        socket.leave();
-    });
+    socketHandler(io, socket);
 });
-
-function getAllConnectedClients(roomId) {
-    return Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
-        (socketId) => {
-            return {
-                socketId,
-                username: userSocketMap[socketId],
-            };
-        }
-    );
-}
 
 // Simple Execute Route
 app.post('/execute', async (req, res) => {
