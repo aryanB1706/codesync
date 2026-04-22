@@ -1,5 +1,6 @@
 const userSocketMap = {}; // Ab isme { username, location } store hoga
 const roomLocks = {};     // Structure: { roomId: { "src/App.js": { socketId, username } } }
+const roomTyping = {};    // Structure: { roomId: { "src/App.js": { socketId, username } } }
 
 const getAllConnectedClients = (io, roomId) => {
     return Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
@@ -24,6 +25,9 @@ module.exports = (io, socket) => {
         // Room ke liye lock object initialize karo agar nahi hai
         if (!roomLocks[roomId]) {
             roomLocks[roomId] = {};
+        }
+        if (!roomTyping[roomId]) {
+            roomTyping[roomId] = {};
         }
 
         const clients = getAllConnectedClients(io, roomId);
@@ -52,6 +56,7 @@ module.exports = (io, socket) => {
         for (const file in roomLocks[roomId]) {
             if (roomLocks[roomId][file].socketId === socket.id) {
                 delete roomLocks[roomId][file];
+                delete roomTyping[roomId][file];
             }
         }
 
@@ -65,18 +70,44 @@ module.exports = (io, socket) => {
 
         // 3. Sabko batao ki locks update ho gaye hain
         io.in(roomId).emit('locks_updated', roomLocks[roomId]);
+        io.in(roomId).emit('typing_updated', roomTyping[roomId]);
     });
 
     // Code Sync
     socket.on('code_change', ({ roomId, code, fileName }) => {
         const fileLock = roomLocks[roomId]?.[fileName];
-        if (fileLock && fileLock.socketId !== socket.id) {
+        if (!fileLock) {
+            socket.emit('locks_updated', roomLocks[roomId] || {});
+            return;
+        }
+        if (fileLock.socketId !== socket.id) {
             socket.emit('lock_denied', { fileName, lock: fileLock });
             socket.emit('locks_updated', roomLocks[roomId]);
             return;
         }
 
         socket.in(roomId).emit('code_change', { code, fileName }); 
+    });
+
+    socket.on('typing_start', ({ roomId, fileName }) => {
+        const fileLock = roomLocks[roomId]?.[fileName];
+        if (!fileLock || fileLock.socketId !== socket.id) return;
+
+        if (!roomTyping[roomId]) roomTyping[roomId] = {};
+        if (roomTyping[roomId][fileName]?.socketId === socket.id) return;
+
+        roomTyping[roomId][fileName] = {
+            socketId: socket.id,
+            username: userSocketMap[socket.id]?.username,
+        };
+        socket.in(roomId).emit('typing_updated', roomTyping[roomId]);
+    });
+
+    socket.on('typing_stop', ({ roomId, fileName }) => {
+        if (roomTyping[roomId]?.[fileName]?.socketId === socket.id) {
+            delete roomTyping[roomId][fileName];
+            io.in(roomId).emit('typing_updated', roomTyping[roomId]);
+        }
     });
 
     // File Creation
@@ -91,9 +122,11 @@ module.exports = (io, socket) => {
             Object.keys(roomLocks[roomId]).forEach(file => {
                 if (file === id || file.startsWith(id + '/')) {
                     delete roomLocks[roomId][file];
+                    delete roomTyping[roomId]?.[file];
                 }
             });
             io.in(roomId).emit('locks_updated', roomLocks[roomId]);
+            io.in(roomId).emit('typing_updated', roomTyping[roomId] || {});
         }
         socket.in(roomId).emit('file_deleted', { id }); 
     });
@@ -108,10 +141,12 @@ module.exports = (io, socket) => {
                 for (const file in roomLocks[roomId]) {
                     if (roomLocks[roomId][file].socketId === socket.id) {
                         delete roomLocks[roomId][file];
+                        delete roomTyping[roomId]?.[file];
                     }
                 }
                 // Updated locks sabko bhej do
                 io.in(roomId).emit('locks_updated', roomLocks[roomId]);
+                io.in(roomId).emit('typing_updated', roomTyping[roomId] || {});
             }
 
             socket.in(roomId).emit('disconnected', {

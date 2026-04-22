@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import Editor from '@monaco-editor/react';
 import { io } from 'socket.io-client';
 import axios from 'axios';
@@ -6,6 +6,8 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://codesync-backend-sj9z.onrender.com';
 
 // === FILE TREE COMPONENT ===
 const FileTreeNode = ({ fileName, nodes, onSelect, onDelete, activeFileName, path, locks, currentSocketId }) => {
@@ -172,9 +174,14 @@ const EditorPage = () => {
     const isRemoteChangeRef = useRef(false);
     // Debounce handle for outgoing emits
     const emitTimerRef = useRef(null);
+    const typingStopTimerRef = useRef(null);
+    const typingActiveRef = useRef(false);
+    const locksRef = useRef({});
+    const currentSocketIdRef = useRef(null);
 
     const [clients, setClients]     = useState([]);
     const [locks, setLocks]         = useState({});
+    const [typingUsers, setTypingUsers] = useState({});
     const [currentSocketId, setCurrentSocketId] = useState(null);
     const [showUsers, setShowUsers] = useState(false);
     const [output, setOutput]       = useState("");
@@ -182,6 +189,8 @@ const EditorPage = () => {
     const [isError, setIsError]     = useState(false);
 
     useEffect(() => { activeFileNameRef.current = activeFileName; }, [activeFileName]);
+    useEffect(() => { locksRef.current = locks; }, [locks]);
+    useEffect(() => { currentSocketIdRef.current = currentSocketId; }, [currentSocketId]);
 
     useEffect(() => {
         if (!location.state) { toast.error("Username is required"); navigate('/'); }
@@ -200,11 +209,13 @@ const EditorPage = () => {
                 userLocation = "Unknown Location";
             }
 
-            socketRef.current = io('https://codesync-backend-sj9z.onrender.com', {
+            socketRef.current = io(BACKEND_URL, {
                 transports: ['websocket', 'polling'], reconnectionAttempts: 5
             });
             socketRef.current.on('connect', () => {
-                setCurrentSocketId(socketRef.current.id);
+                const socketId = socketRef.current.id;
+                currentSocketIdRef.current = socketId;
+                setCurrentSocketId(socketId);
             });
             socketRef.current.on('connect_error', () => toast.error('Socket connection failed'));
             socketRef.current.emit('join', { roomId, username, location: userLocation });
@@ -212,13 +223,20 @@ const EditorPage = () => {
             socketRef.current.on('joined', ({ clients, username: joinedUsername, locks }) => {
                 if (joinedUsername !== username) toast.success(`${joinedUsername} joined.`);
                 setClients(clients);
-                if (locks) setLocks(locks);
+                if (locks) {
+                    locksRef.current = locks;
+                    setLocks(locks);
+                }
                 if (joinedUsername === username) {
                     socketRef.current?.emit('lock_file', { roomId, fileName: activeFileNameRef.current });
                 }
             });
 
-            socketRef.current.on('locks_updated', setLocks);
+            socketRef.current.on('locks_updated', (updatedLocks) => {
+                locksRef.current = updatedLocks || {};
+                setLocks(updatedLocks || {});
+            });
+            socketRef.current.on('typing_updated', (typing) => setTypingUsers(typing || {}));
 
             socketRef.current.on('lock_denied', ({ fileName, lock }) => {
                 toast.error(`${fileName} is already being edited by ${lock.username}`);
@@ -243,14 +261,14 @@ const EditorPage = () => {
                 // Block our own onChange from re-emitting this change
                 isRemoteChangeRef.current = true;
 
-                const selections = editorRef.current.getSelections();
+                // Cursor preservation ke liye tumhara function
                 const edit = getMinimalEdit(model, code);
 
                 try {
                     if (edit) {
-                        editorRef.current.executeEdits('remote-sync', [edit], selections || undefined);
+                        // Direct model pe apply karo (bypasses readOnly)
+                        model.applyEdits([edit]);
                     }
-                    if (selections?.length) editorRef.current.setSelections(selections);
                 } finally {
                     queueMicrotask(() => {
                         isRemoteChangeRef.current = false;
@@ -279,6 +297,10 @@ const EditorPage = () => {
         initSocket();
         return () => {
             clearTimeout(emitTimerRef.current);
+            clearTimeout(typingStopTimerRef.current);
+            typingActiveRef.current = false;
+            socketRef.current?.emit('typing_stop', { roomId, fileName: activeFileNameRef.current });
+            socketRef.current?.emit('lock_file', { roomId, fileName: null });
             socketRef.current?.disconnect();
         };
     }, [roomId, username]);
@@ -290,9 +312,17 @@ const EditorPage = () => {
 
     // ── FILE SELECT (TAB SWITCH) ─────────────────────────────────────────────
     const handleFileSelect = useCallback((path) => {
+        const previousFileName = activeFileNameRef.current;
+
         // Persist current editor value to ref before switching away
         if (editorRef.current && activeFileNameRef.current && filesRef.current[activeFileNameRef.current]) {
             filesRef.current[activeFileNameRef.current].value = editorRef.current.getValue();
+        }
+
+        clearTimeout(typingStopTimerRef.current);
+        typingActiveRef.current = false;
+        if (previousFileName) {
+            socketRef.current?.emit('typing_stop', { roomId, fileName: previousFileName });
         }
 
         activeFileNameRef.current = path;
@@ -308,6 +338,21 @@ const EditorPage = () => {
         socketRef.current?.emit('lock_file', { roomId, fileName: path });
     }, [roomId]);
 
+    const handleRequestLock = useCallback(() => {
+        const fileName = activeFileNameRef.current;
+        if (!fileName) return;
+        socketRef.current?.emit('lock_file', { roomId, fileName });
+    }, [roomId]);
+
+    const handleReleaseLock = useCallback(() => {
+        const fileName = activeFileNameRef.current;
+        if (!fileName) return;
+        clearTimeout(typingStopTimerRef.current);
+        typingActiveRef.current = false;
+        socketRef.current?.emit('typing_stop', { roomId, fileName });
+        socketRef.current?.emit('lock_file', { roomId, fileName: null });
+    }, [roomId]);
+
     // ── TYPING ───────────────────────────────────────────────────────────────
     // NO setState. Only update ref + debounced socket emit.
     // This is why there's zero flicker when you type.
@@ -316,9 +361,21 @@ const EditorPage = () => {
 
         const fileName = activeFileNameRef.current;
         if (!fileName || !filesRef.current[fileName]) return;
+        if (locksRef.current[fileName]?.socketId !== currentSocketIdRef.current) return;
 
         const code = value ?? '';
         filesRef.current[fileName].value = code;
+
+        if (!typingActiveRef.current) {
+            typingActiveRef.current = true;
+            socketRef.current?.emit('typing_start', { roomId, fileName });
+        }
+
+        clearTimeout(typingStopTimerRef.current);
+        typingStopTimerRef.current = setTimeout(() => {
+            typingActiveRef.current = false;
+            socketRef.current?.emit('typing_stop', { roomId, fileName });
+        }, 1200);
 
         clearTimeout(emitTimerRef.current);
         emitTimerRef.current = setTimeout(() => {
@@ -349,6 +406,8 @@ const EditorPage = () => {
         if (activeFileNameRef.current === pathToDelete || activeFileNameRef.current.startsWith(pathToDelete + '/')) {
             activeFileNameRef.current = "";
             setActiveFileName("");
+            typingActiveRef.current = false;
+            socketRef.current?.emit('typing_stop', { roomId, fileName: pathToDelete });
             socketRef.current?.emit('lock_file', { roomId, fileName: null });
         }
     }, [roomId]);
@@ -404,7 +463,7 @@ const EditorPage = () => {
             f.name === fn ? { ...f, value: latestValue } : f
         );
         try {
-            const res = await axios.post('https://codesync-backend-sj9z.onrender.com/execute', {
+            const res = await axios.post(`${BACKEND_URL}/execute`, {
                 files: filesArray, mainFile: { ...currentFile, value: latestValue }, language: currentFile.language
             });
             const r = res.data.run;
@@ -424,12 +483,24 @@ const EditorPage = () => {
         toast.success("Project downloaded!");
     };
 
-    if (!location.state) return null;
-
     const file        = filesRef.current[activeFileName];
     const fileTree    = buildFileTree(fileKeys);
     const currentLock = locks[activeFileName];
-    const isReadOnly  = !!(currentLock && currentLock.socketId !== currentSocketId);
+    const hasMyLock   = !!(currentLock && currentLock.socketId === currentSocketId);
+    const isReadOnly  = !!activeFileName && !hasMyLock;
+    const currentTyping = typingUsers[activeFileName];
+    const isOtherTyping = !!(currentTyping && currentTyping.socketId !== currentSocketId);
+    const editorOptions = useMemo(() => ({
+        minimap: { enabled: false },
+        fontSize: 14,
+        automaticLayout: true,
+        readOnly: isReadOnly,
+        domReadOnly: isReadOnly,
+        renderWhitespace: 'none',
+        renderControlCharacters: false,
+    }), [isReadOnly]);
+
+    if (!location.state) return null;
 
     return (
         <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#1e1e1e', overflow: 'hidden' }}>
@@ -490,9 +561,35 @@ const EditorPage = () => {
                         <div style={{ padding: '0 15px', color: '#fff', display: 'flex', alignItems: 'center', borderTop: '2px solid #4aed88', fontSize: '13px', gap: '8px' }}>
                             {activeFileName ? <>{getFileIcon(activeFileName)} {activeFileName.split('/').pop()}</> : "No File Selected"}
                         </div>
-                        {isReadOnly && (
-                            <div style={{ display: 'flex', alignItems: 'center', padding: '0 15px', color: '#f14c4c', fontSize: '12px', fontWeight: 'bold' }}>
-                                🔒 Locked by {currentLock.username} (View Only)
+                        {activeFileName && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0 15px', color: '#cfcfcf', fontSize: '12px', fontWeight: 'bold' }}>
+                                {currentLock ? (
+                                    currentLock.socketId === currentSocketId ? (
+                                        <>
+                                            <span style={{ color: '#4aed88' }}>✏️ You are editing</span>
+                                            <button
+                                                onClick={handleReleaseLock}
+                                                style={{ background: '#3a3a3a', color: '#fff', border: '1px solid #555', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}
+                                            >
+                                                Unlock
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <span style={{ color: isOtherTyping ? '#fbbf24' : '#f14c4c' }}>
+                                            {isOtherTyping ? `${currentTyping.username} is typing...` : `🔒 Locked by ${currentLock.username} (View Only)`}
+                                        </span>
+                                    )
+                                ) : (
+                                    <>
+                                        <span style={{ color: '#aaa' }}>View only</span>
+                                        <button
+                                            onClick={handleRequestLock}
+                                            style={{ background: '#0e639c', color: '#fff', border: 'none', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold' }}
+                                        >
+                                            Lock to edit
+                                        </button>
+                                    </>
+                                )}
                             </div>
                         )}
                     </div>
@@ -507,15 +604,7 @@ const EditorPage = () => {
                                 defaultValue={file?.value || ""}
                                 onChange={handleEditorChange}
                                 onMount={handleEditorDidMount}
-                                options={{
-                                    minimap: { enabled: false },
-                                    fontSize: 14,
-                                    automaticLayout: true,
-                                    readOnly: isReadOnly,
-                                    domReadOnly: isReadOnly,
-                                    renderWhitespace: 'none',
-                                    renderControlCharacters: false,
-                                }}
+                                options={editorOptions}
                             />
                         ) : (
                             <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#555' }}>
