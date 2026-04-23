@@ -6,6 +6,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import SessionTape from '../components/SessionTape';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://codesync-backend-sj9z.onrender.com';
 
@@ -143,6 +144,27 @@ const getMinimalEdit = (model, nextValue) => {
     };
 };
 
+const applyTapeEventToFileStore = (fileStore, event) => {
+    if (!event?.filePath) return;
+
+    if (event.type === 'FILE_DELETE') {
+        Object.keys(fileStore).forEach((fileName) => {
+            if (fileName === event.filePath || fileName.startsWith(`${event.filePath}/`)) {
+                delete fileStore[fileName];
+            }
+        });
+        return;
+    }
+
+    if (event.type === 'FILE_EDIT' || event.type === 'FILE_CREATE') {
+        fileStore[event.filePath] = {
+            name: event.filePath,
+            language: getLang(event.filePath),
+            value: event.fullContent || '',
+        };
+    }
+};
+
 const EditorPage = () => {
     const socketRef = useRef(null);
     const location = useLocation();
@@ -172,6 +194,8 @@ const EditorPage = () => {
 
     // Prevents echoing remote changes back to socket
     const isRemoteChangeRef = useRef(false);
+    const isReplayingRef = useRef(false);
+    const liveFilesBeforeReplayRef = useRef(null);
     // Debounce handle for outgoing emits
     const emitTimerRef = useRef(null);
     const typingStopTimerRef = useRef(null);
@@ -187,14 +211,88 @@ const EditorPage = () => {
     const [output, setOutput]       = useState("");
     const [isLoading, setIsLoading] = useState(false);
     const [isError, setIsError]     = useState(false);
+    const [sessionTape, setSessionTape] = useState([]);
+    const [isReplaying, setIsReplaying] = useState(false);
 
     useEffect(() => { activeFileNameRef.current = activeFileName; }, [activeFileName]);
     useEffect(() => { locksRef.current = locks; }, [locks]);
     useEffect(() => { currentSocketIdRef.current = currentSocketId; }, [currentSocketId]);
+    useEffect(() => { isReplayingRef.current = isReplaying; }, [isReplaying]);
 
     useEffect(() => {
         if (!location.state) { toast.error("Username is required"); navigate('/'); }
     }, [location.state, navigate]);
+
+    const cloneCurrentFiles = useCallback(() => {
+        const cloned = {};
+
+        Object.entries(filesRef.current).forEach(([fileName, fileData]) => {
+            cloned[fileName] = { ...fileData };
+        });
+
+        const active = activeFileNameRef.current;
+        if (editorRef.current && active && cloned[active] && !isReplayingRef.current) {
+            cloned[active].value = editorRef.current.getValue();
+        }
+
+        return cloned;
+    }, []);
+
+    const applyFileStoreToEditor = useCallback((nextStore, preferredActiveFile) => {
+        filesRef.current = nextStore;
+
+        const keys = Object.keys(nextStore);
+        const nextActiveFile = keys.includes(preferredActiveFile)
+            ? preferredActiveFile
+            : keys[0] || "";
+
+        activeFileNameRef.current = nextActiveFile;
+        setActiveFileName(nextActiveFile);
+        setFileKeys(keys);
+
+        if (editorRef.current) {
+            isRemoteChangeRef.current = true;
+            editorRef.current.getModel()?.setValue(nextActiveFile ? nextStore[nextActiveFile]?.value || '' : '');
+            queueMicrotask(() => {
+                isRemoteChangeRef.current = false;
+            });
+        }
+    }, []);
+
+    const applyReplayFiles = useCallback((fileMap) => {
+        const replayStore = {};
+
+        Object.entries(fileMap).forEach(([fileName, value]) => {
+            replayStore[fileName] = {
+                name: fileName,
+                language: getLang(fileName),
+                value,
+            };
+        });
+
+        applyFileStoreToEditor(replayStore, activeFileNameRef.current);
+    }, [applyFileStoreToEditor]);
+
+    const handleTapeScrub = useCallback((eventIndex) => {
+        if (!socketRef.current) return;
+
+        if (!isReplayingRef.current) {
+            liveFilesBeforeReplayRef.current = cloneCurrentFiles();
+            isReplayingRef.current = true;
+            setIsReplaying(true);
+        }
+
+        socketRef.current.emit('tape-scrub', { roomId, eventIndex });
+    }, [cloneCurrentFiles, roomId]);
+
+    const handleExitReplay = useCallback(() => {
+        const liveStore = liveFilesBeforeReplayRef.current || cloneCurrentFiles();
+        liveFilesBeforeReplayRef.current = null;
+        isReplayingRef.current = false;
+        setIsReplaying(false);
+        applyFileStoreToEditor(liveStore, activeFileNameRef.current);
+        socketRef.current?.emit('lock_file', { roomId, fileName: activeFileNameRef.current || null });
+    }, [applyFileStoreToEditor, cloneCurrentFiles, roomId]);
 
     // ── SOCKET SETUP ─────────────────────────────────────────────────────────
     useEffect(() => {
@@ -219,6 +317,7 @@ const EditorPage = () => {
             });
             socketRef.current.on('connect_error', () => toast.error('Socket connection failed'));
             socketRef.current.emit('join', { roomId, username, location: userLocation });
+            socketRef.current.emit('request-tape', { roomId });
 
             socketRef.current.on('joined', ({ clients, username: joinedUsername, locks }) => {
                 if (joinedUsername !== username) toast.success(`${joinedUsername} joined.`);
@@ -247,6 +346,8 @@ const EditorPage = () => {
             // Rule: setState is NEVER called here. Only update the ref and, if
             // the file is currently open, patch the Monaco model surgically.
             socketRef.current.on('code_change', ({ fileName, code }) => {
+                if (isReplayingRef.current) return;
+
                 // 1. Always sync ref (background files stay up-to-date for zip/run)
                 if (filesRef.current[fileName]) {
                     filesRef.current[fileName].value = code;
@@ -277,15 +378,40 @@ const EditorPage = () => {
             });
 
             socketRef.current.on('file_created', ({ fileName, language, value }) => {
+                if (isReplayingRef.current) return;
+
                 filesRef.current[fileName] = { name: fileName, language, value };
                 setFileKeys(Object.keys(filesRef.current));
             });
 
             socketRef.current.on('file_deleted', ({ id }) => {
+                if (isReplayingRef.current) return;
+
                 Object.keys(filesRef.current).forEach(k => {
                     if (k === id || k.startsWith(id + '/')) delete filesRef.current[k];
                 });
                 setFileKeys(Object.keys(filesRef.current));
+            });
+
+            socketRef.current.on('tape-snapshot', (tape) => {
+                setSessionTape(tape || []);
+            });
+
+            socketRef.current.on('tape-new-event', (event) => {
+                if (!event) return;
+
+                setSessionTape(prev => {
+                    if (prev.some(item => item.eventIndex === event.eventIndex)) return prev;
+                    return [...prev, event];
+                });
+
+                if (isReplayingRef.current && liveFilesBeforeReplayRef.current) {
+                    applyTapeEventToFileStore(liveFilesBeforeReplayRef.current, event);
+                }
+            });
+
+            socketRef.current.on('tape-state-at', ({ files }) => {
+                applyReplayFiles(files || {});
             });
 
             socketRef.current.on('disconnected', ({ socketId, username }) => {
@@ -303,7 +429,7 @@ const EditorPage = () => {
             socketRef.current?.emit('lock_file', { roomId, fileName: null });
             socketRef.current?.disconnect();
         };
-    }, [roomId, username]);
+    }, [applyReplayFiles, roomId, username]);
 
     // ── EDITOR MOUNT ─────────────────────────────────────────────────────────
     const handleEditorDidMount = useCallback((editor) => {
@@ -335,7 +461,9 @@ const EditorPage = () => {
             isRemoteChangeRef.current = false;
         }
 
-        socketRef.current?.emit('lock_file', { roomId, fileName: path });
+        if (!isReplayingRef.current) {
+            socketRef.current?.emit('lock_file', { roomId, fileName: path });
+        }
     }, [roomId]);
 
     const handleRequestLock = useCallback(() => {
@@ -358,6 +486,7 @@ const EditorPage = () => {
     // This is why there's zero flicker when you type.
     const handleEditorChange = useCallback((value) => {
         if (isRemoteChangeRef.current) return;
+        if (isReplayingRef.current) return;
 
         const fileName = activeFileNameRef.current;
         if (!fileName || !filesRef.current[fileName]) return;
@@ -398,6 +527,11 @@ const EditorPage = () => {
     };
 
     const handleDeleteNode = useCallback((pathToDelete) => {
+        if (isReplayingRef.current) {
+            toast.error("Exit replay mode before deleting files.");
+            return;
+        }
+
         Object.keys(filesRef.current).forEach(k => {
             if (k === pathToDelete || k.startsWith(pathToDelete + '/')) delete filesRef.current[k];
         });
@@ -432,6 +566,12 @@ const EditorPage = () => {
     });
 
     const handleUpload = async (e) => {
+        if (isReplayingRef.current) {
+            toast.error("Exit replay mode before uploading files.");
+            e.target.value = '';
+            return;
+        }
+
         if (!e.target.files) return;
         for (const file of e.target.files) {
             if (file.name === '.DS_Store') continue;
@@ -444,6 +584,11 @@ const EditorPage = () => {
     };
 
     const createNewFile = () => {
+        if (isReplayingRef.current) {
+            toast.error("Exit replay mode before creating files.");
+            return;
+        }
+
         const fileName = prompt("Enter file path (e.g., src/main.cpp):");
         if (!fileName || filesRef.current[fileName]) return;
         const nf = { name: fileName, language: getLang(fileName), value: `// ${fileName}` };
@@ -490,15 +635,16 @@ const EditorPage = () => {
     const isReadOnly  = !!activeFileName && !hasMyLock;
     const currentTyping = typingUsers[activeFileName];
     const isOtherTyping = !!(currentTyping && currentTyping.socketId !== currentSocketId);
+    const hasTape = sessionTape.length > 0;
     const editorOptions = useMemo(() => ({
         minimap: { enabled: false },
         fontSize: 14,
         automaticLayout: true,
-        readOnly: isReadOnly,
-        domReadOnly: isReadOnly,
+        readOnly: isReadOnly || isReplaying,
+        domReadOnly: isReadOnly || isReplaying,
         renderWhitespace: 'none',
         renderControlCharacters: false,
-    }), [isReadOnly]);
+    }), [isReadOnly, isReplaying]);
 
     if (!location.state) return null;
 
@@ -536,16 +682,16 @@ const EditorPage = () => {
             </div>
 
             {/* Main Workspace */}
-            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden', paddingBottom: hasTape ? '70px' : 0 }}>
 
                 {/* Sidebar */}
                 <div style={{ width: '220px', background: '#252526', borderRight: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
                     <div style={{ padding: '10px 15px', color: '#bbb', fontSize: '11px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span>EXPLORER</span>
                         <div style={{ display: 'flex', gap: '5px' }}>
-                            <button onClick={() => folderInputRef.current.click()} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: '16px' }} title="Open Folder">📂</button>
-                            <button onClick={() => fileInputRef.current.click()}   style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: '16px' }} title="Upload File">📄</button>
-                            <button onClick={createNewFile}                        style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: '18px' }} title="New File">+</button>
+                            <button disabled={isReplaying} onClick={() => folderInputRef.current.click()} style={{ background: 'none', border: 'none', color: isReplaying ? '#666' : '#ccc', cursor: isReplaying ? 'not-allowed' : 'pointer', fontSize: '16px' }} title="Open Folder">📂</button>
+                            <button disabled={isReplaying} onClick={() => fileInputRef.current.click()}   style={{ background: 'none', border: 'none', color: isReplaying ? '#666' : '#ccc', cursor: isReplaying ? 'not-allowed' : 'pointer', fontSize: '16px' }} title="Upload File">📄</button>
+                            <button disabled={isReplaying} onClick={createNewFile}                        style={{ background: 'none', border: 'none', color: isReplaying ? '#666' : '#ccc', cursor: isReplaying ? 'not-allowed' : 'pointer', fontSize: '18px' }} title="New File">+</button>
                         </div>
                     </div>
                     <input type="file" multiple ref={fileInputRef}   style={{ display: 'none' }} onChange={handleUpload} />
@@ -569,6 +715,7 @@ const EditorPage = () => {
                                             <span style={{ color: '#4aed88' }}>✏️ You are editing</span>
                                             <button
                                                 onClick={handleReleaseLock}
+                                                disabled={isReplaying}
                                                 style={{ background: '#3a3a3a', color: '#fff', border: '1px solid #555', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}
                                             >
                                                 Unlock
@@ -584,6 +731,7 @@ const EditorPage = () => {
                                         <span style={{ color: '#aaa' }}>View only</span>
                                         <button
                                             onClick={handleRequestLock}
+                                            disabled={isReplaying}
                                             style={{ background: '#0e639c', color: '#fff', border: 'none', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold' }}
                                         >
                                             Lock to edit
@@ -630,6 +778,14 @@ const EditorPage = () => {
                     </div>
                 </div>
             </div>
+            {hasTape && (
+                <SessionTape
+                    tape={sessionTape}
+                    onScrub={handleTapeScrub}
+                    isReplaying={isReplaying}
+                    onExitReplay={handleExitReplay}
+                />
+            )}
         </div>
     );
 };

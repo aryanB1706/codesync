@@ -1,6 +1,7 @@
 const userSocketMap = {}; // Ab isme { username, location } store hoga
 const roomLocks = {};     // Structure: { roomId: { "src/App.js": { socketId, username } } }
 const roomTyping = {};    // Structure: { roomId: { "src/App.js": { socketId, username } } }
+const { recordEvent, getTape, reconstructStateAt } = require('../sessionTape');
 
 const getAllConnectedClients = (io, roomId) => {
     return Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
@@ -16,6 +17,8 @@ const getAllConnectedClients = (io, roomId) => {
 
 module.exports = (io, socket) => {
     console.log('User Connected', socket.id);
+
+    const getUsername = () => userSocketMap[socket.id]?.username || 'Unknown';
 
     // Join Room (Updated with Location)
     socket.on('join', ({ roomId, username, location }) => {
@@ -86,6 +89,14 @@ module.exports = (io, socket) => {
             return;
         }
 
+        const tapeEvent = recordEvent(roomId, {
+            type: 'FILE_EDIT',
+            filePath: fileName,
+            fullContent: code,
+            userId: socket.id,
+            username: getUsername(),
+        });
+        io.to(roomId).emit('tape-new-event', tapeEvent);
         socket.in(roomId).emit('code_change', { code, fileName }); 
     });
 
@@ -112,6 +123,14 @@ module.exports = (io, socket) => {
 
     // File Creation
     socket.on('file_created', ({ roomId, fileName, language, value }) => {
+        const tapeEvent = recordEvent(roomId, {
+            type: 'FILE_CREATE',
+            filePath: fileName,
+            fullContent: value || '',
+            userId: socket.id,
+            username: getUsername(),
+        });
+        io.to(roomId).emit('tape-new-event', tapeEvent);
         socket.in(roomId).emit('file_created', { fileName, language, value });
     });
 
@@ -128,7 +147,24 @@ module.exports = (io, socket) => {
             io.in(roomId).emit('locks_updated', roomLocks[roomId]);
             io.in(roomId).emit('typing_updated', roomTyping[roomId] || {});
         }
+        const tapeEvent = recordEvent(roomId, {
+            type: 'FILE_DELETE',
+            filePath: id,
+            fullContent: '',
+            userId: socket.id,
+            username: getUsername(),
+        });
+        io.to(roomId).emit('tape-new-event', tapeEvent);
         socket.in(roomId).emit('file_deleted', { id }); 
+    });
+
+    socket.on('request-tape', ({ roomId }) => {
+        socket.emit('tape-snapshot', getTape(roomId));
+    });
+
+    socket.on('tape-scrub', ({ roomId, eventIndex }) => {
+        const reconstructedFiles = reconstructStateAt(roomId, eventIndex);
+        socket.emit('tape-state-at', { eventIndex, files: reconstructedFiles });
     });
 
     // Disconnect
