@@ -35,6 +35,8 @@
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
+    min-height: 44px;
+    overflow: hidden;
 }
 
 .tape-btn {
@@ -51,6 +53,28 @@
 
 .tape-btn:hover {
     background: #35355b;
+}
+
+.tape-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.play-btn {
+    min-width: 72px;
+    background: #0e639c;
+    color: #fff;
+    border-color: #47a8ff;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.play-btn:hover {
+    background: #1177bb;
+}
+
+.play-btn:disabled:hover {
+    background: #0e639c;
 }
 
 .live-btn {
@@ -73,6 +97,11 @@
     width: 100%;
     accent-color: #4a9eff;
     cursor: pointer;
+}
+
+.tape-slider:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
 }
 
 .tape-markers {
@@ -147,7 +176,23 @@
     cursor: pointer;
 }
 
+.speed-select:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
 @media (max-width: 780px) {
+    .tape-controls {
+        flex-wrap: wrap;
+        overflow: visible;
+    }
+
+    .tape-slider-wrapper {
+        order: 10;
+        flex-basis: 100%;
+        min-width: 100%;
+    }
+
     .tape-event-info {
         display: none;
     }
@@ -155,5 +200,9 @@
     .tape-btn {
         min-width: 34px;
         padding: 4px 6px;
+    }
+
+    .play-btn {
+        min-width: 64px;
     }
 }

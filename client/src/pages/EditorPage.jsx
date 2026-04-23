@@ -7,14 +7,33 @@ import toast from 'react-hot-toast';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import SessionTape from '../components/SessionTape';
+import './EditorPage.css';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://codesync-backend-sj9z.onrender.com';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
+    || (import.meta.env.DEV ? 'http://localhost:5000' : 'https://codesync-backend-sj9z.onrender.com');
+const StableEditor = React.memo(Editor);
 
 // === FILE TREE COMPONENT ===
-const FileTreeNode = ({ fileName, nodes, onSelect, onDelete, activeFileName, path, locks, currentSocketId }) => {
+const FileTreeNode = ({
+    fileName,
+    nodes,
+    onSelect,
+    onDelete,
+    onNewFile,
+    activeFileName,
+    path,
+    locks,
+    currentSocketId,
+    depth = 0,
+}) => {
     const isFolder = nodes !== null;
-    const [isOpen, setIsOpen] = useState(false);
     const fullPath = path ? `${path}/${fileName}` : fileName;
+    const hasActiveChild = isFolder && !!activeFileName && (activeFileName === fullPath || activeFileName.startsWith(`${fullPath}/`));
+    const [isOpen, setIsOpen] = useState(hasActiveChild);
+
+    useEffect(() => {
+        if (hasActiveChild) setIsOpen(true);
+    }, [hasActiveChild]);
 
     const handleDeleteClick = (e) => {
         e.stopPropagation();
@@ -29,51 +48,69 @@ const FileTreeNode = ({ fileName, nodes, onSelect, onDelete, activeFileName, pat
         let lockIndicator = null;
         if (fileLock) {
             if (fileLock.socketId === currentSocketId) {
-                lockIndicator = <span style={{ fontSize: '10px', color: '#4aed88', marginLeft: '5px' }}>✏️</span>;
+                lockIndicator = <span className="file-lock file-lockMine" title="You are editing">EDIT</span>;
             } else {
-                lockIndicator = <span style={{ fontSize: '10px', color: '#f14c4c', marginLeft: '5px' }} title={`Locked by ${fileLock.username}`}>🔒 ({fileLock.username})</span>;
+                lockIndicator = <span className="file-lock file-lockOther" title={`Locked by ${fileLock.username}`}>{fileLock.username}</span>;
             }
         }
         return (
             <div
                 onClick={() => onSelect(fullPath)}
-                style={{
-                    padding: '5px 10px 5px 25px', cursor: 'pointer',
-                    background: activeFileName === fullPath ? '#37373d' : 'transparent',
-                    color: activeFileName === fullPath ? '#fff' : '#9d9d9d',
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    fontSize: '14px',
-                    borderLeft: activeFileName === fullPath ? '3px solid #4aed88' : '3px solid transparent'
-                }}
+                className={`fileTree-row fileTree-file ${activeFileName === fullPath ? 'is-active' : ''}`}
+                style={{ '--depth': depth }}
+                title={fullPath}
             >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    <span>{getFileIcon(fileName)}</span>
-                    {fileName}
+                <div className="fileTree-name">
+                    <span className={`fileTypeIcon ${getFileIconClass(fileName)}`}>{getFileIcon(fileName)}</span>
+                    <span className="fileTree-label">{fileName}</span>
                     {lockIndicator}
                 </div>
-                <span onClick={handleDeleteClick} style={{ cursor: 'pointer', fontSize: '12px', opacity: 0.7 }} title="Delete">🗑️</span>
+                <button className="fileTree-action" onClick={handleDeleteClick} title="Delete file">x</button>
             </div>
         );
     }
 
     return (
-        <div>
+        <div className="fileTree-folderGroup">
             <div
                 onClick={() => setIsOpen(!isOpen)}
-                style={{ padding: '5px 10px', cursor: 'pointer', color: '#ccc', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '14px' }}
+                className={`fileTree-row fileTree-folder ${hasActiveChild ? 'has-active-child' : ''}`}
+                style={{ '--depth': depth }}
+                title={fullPath}
             >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                    <span>{isOpen ? '📂' : '📁'}</span> {fileName}
+                <div className="fileTree-name">
+                    <span className="folderChevron">{isOpen ? '▾' : '▸'}</span>
+                    <span className={`folderIcon ${isOpen ? 'is-open' : ''}`}></span>
+                    <span className="fileTree-label">{fileName}</span>
                 </div>
-                <span onClick={handleDeleteClick} style={{ cursor: 'pointer', fontSize: '12px', opacity: 0.7 }} title="Delete Folder">🗑️</span>
+                <div className="fileTree-actions">
+                    <button
+                        className="fileTree-action"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onNewFile(fullPath);
+                            setIsOpen(true);
+                        }}
+                        title={`New file in ${fileName}`}
+                    >
+                        +
+                    </button>
+                    <button className="fileTree-action" onClick={handleDeleteClick} title="Delete folder">x</button>
+                </div>
             </div>
             {isOpen && (
-                <div style={{ paddingLeft: '15px', borderLeft: '1px solid #333' }}>
-                    {Object.keys(nodes).map((childName) => (
+                <div>
+                    {Object.keys(nodes).sort((a, b) => {
+                        const aIsFolder = nodes[a] !== null;
+                        const bIsFolder = nodes[b] !== null;
+                        if (aIsFolder !== bIsFolder) return aIsFolder ? -1 : 1;
+                        return a.localeCompare(b);
+                    }).map((childName) => (
                         <FileTreeNode
                             key={childName} fileName={childName} nodes={nodes[childName]}
                             onSelect={onSelect} onDelete={onDelete} activeFileName={activeFileName} path={fullPath}
-                            locks={locks} currentSocketId={currentSocketId}
+                            locks={locks} currentSocketId={currentSocketId} onNewFile={onNewFile}
+                            depth={depth + 1}
                         />
                     ))}
                 </div>
@@ -83,14 +120,25 @@ const FileTreeNode = ({ fileName, nodes, onSelect, onDelete, activeFileName, pat
 };
 
 const getFileIcon = (name) => {
-    if (name.endsWith('.html')) return '🌐';
-    if (name.endsWith('.css')) return '🎨';
-    if (name.endsWith('.js')) return '📜';
-    if (name.endsWith('.jsx')) return '⚛️';
-    if (name.endsWith('.py')) return '🐍';
-    if (name.endsWith('.java')) return '☕';
-    if (name.endsWith('.cpp')) return '⚙️';
-    return '📄';
+    if (name.endsWith('.html')) return '<>';
+    if (name.endsWith('.css')) return '#';
+    if (name.endsWith('.js')) return 'JS';
+    if (name.endsWith('.jsx')) return 'RX';
+    if (name.endsWith('.py')) return 'PY';
+    if (name.endsWith('.java')) return 'JV';
+    if (name.endsWith('.cpp') || name.endsWith('.c')) return 'C';
+    return '';
+};
+
+const getFileIconClass = (name) => {
+    if (name.endsWith('.html')) return 'is-html';
+    if (name.endsWith('.css')) return 'is-css';
+    if (name.endsWith('.js')) return 'is-js';
+    if (name.endsWith('.jsx')) return 'is-jsx';
+    if (name.endsWith('.py')) return 'is-py';
+    if (name.endsWith('.java')) return 'is-java';
+    if (name.endsWith('.cpp') || name.endsWith('.c')) return 'is-cpp';
+    return 'is-default';
 };
 
 const getLang = (fileName) => {
@@ -213,6 +261,9 @@ const EditorPage = () => {
     const [isError, setIsError]     = useState(false);
     const [sessionTape, setSessionTape] = useState([]);
     const [isReplaying, setIsReplaying] = useState(false);
+    const [isCreatingFile, setIsCreatingFile] = useState(false);
+    const [newFileBasePath, setNewFileBasePath] = useState('');
+    const [newFileName, setNewFileName] = useState('');
 
     useEffect(() => { activeFileNameRef.current = activeFileName; }, [activeFileName]);
     useEffect(() => { locksRef.current = locks; }, [locks]);
@@ -298,6 +349,8 @@ const EditorPage = () => {
     useEffect(() => {
         if (!username) return undefined;
 
+        let isDisposed = false;
+
         const initSocket = async () => {
             let userLocation = "Unknown Location";
             try {
@@ -306,6 +359,8 @@ const EditorPage = () => {
             } catch {
                 userLocation = "Unknown Location";
             }
+
+            if (isDisposed) return;
 
             socketRef.current = io(BACKEND_URL, {
                 transports: ['websocket', 'polling'], reconnectionAttempts: 5
@@ -422,6 +477,7 @@ const EditorPage = () => {
 
         initSocket();
         return () => {
+            isDisposed = true;
             clearTimeout(emitTimerRef.current);
             clearTimeout(typingStopTimerRef.current);
             typingActiveRef.current = false;
@@ -490,10 +546,11 @@ const EditorPage = () => {
 
         const fileName = activeFileNameRef.current;
         if (!fileName || !filesRef.current[fileName]) return;
-        if (locksRef.current[fileName]?.socketId !== currentSocketIdRef.current) return;
 
         const code = value ?? '';
         filesRef.current[fileName].value = code;
+
+        if (locksRef.current[fileName]?.socketId !== currentSocketIdRef.current) return;
 
         if (!typingActiveRef.current) {
             typingActiveRef.current = true;
@@ -547,12 +604,18 @@ const EditorPage = () => {
     }, [roomId]);
 
     const renderTree = (node, path = '') =>
-        Object.keys(node).map(key => (
+        Object.keys(node).sort((a, b) => {
+            const aIsFolder = node[a] !== null;
+            const bIsFolder = node[b] !== null;
+            if (aIsFolder !== bIsFolder) return aIsFolder ? -1 : 1;
+            return a.localeCompare(b);
+        }).map(key => (
             <FileTreeNode
                 key={key} fileName={key} nodes={node[key]} path={path}
                 onSelect={handleFileSelect} onDelete={handleDeleteNode}
                 activeFileName={activeFileName}
                 locks={locks} currentSocketId={currentSocketId}
+                onNewFile={startCreateNewFile}
             />
         ));
 
@@ -583,20 +646,65 @@ const EditorPage = () => {
         toast.success("Uploaded successfully!");
     };
 
-    const createNewFile = () => {
+    const startCreateNewFile = useCallback((basePath = '') => {
         if (isReplayingRef.current) {
             toast.error("Exit replay mode before creating files.");
             return;
         }
 
-        const fileName = prompt("Enter file path (e.g., src/main.cpp):");
+        setNewFileBasePath(basePath);
+        setNewFileName('');
+        setIsCreatingFile(true);
+    }, []);
+
+    const cancelCreateNewFile = useCallback(() => {
+        setIsCreatingFile(false);
+        setNewFileBasePath('');
+        setNewFileName('');
+    }, []);
+
+    const createNewFile = useCallback((filePath) => {
+        const fileName = filePath
+            .replace(/\\/g, '/')
+            .replace(/\/+/g, '/')
+            .replace(/^\/|\/$/g, '')
+            .trim();
+
         if (!fileName || filesRef.current[fileName]) return;
         const nf = { name: fileName, language: getLang(fileName), value: `// ${fileName}` };
         filesRef.current[fileName] = nf;
         setFileKeys(Object.keys(filesRef.current));
         handleFileSelect(fileName);
         socketRef.current?.emit('file_created', { roomId, fileName, language: nf.language, value: nf.value });
-    };
+        toast.success(`${fileName} created`);
+    }, [handleFileSelect, roomId]);
+
+    const submitNewFile = useCallback((e) => {
+        e.preventDefault();
+
+        if (isReplayingRef.current) {
+            toast.error("Exit replay mode before creating files.");
+            return;
+        }
+
+        const nextPath = newFileBasePath
+            ? `${newFileBasePath}/${newFileName}`
+            : newFileName;
+        const normalizedPath = nextPath
+            .replace(/\\/g, '/')
+            .replace(/\/+/g, '/')
+            .replace(/^\/|\/$/g, '')
+            .trim();
+
+        if (!normalizedPath) return;
+        if (filesRef.current[normalizedPath]) {
+            toast.error("File already exists.");
+            return;
+        }
+
+        createNewFile(normalizedPath);
+        cancelCreateNewFile();
+    }, [cancelCreateNewFile, createNewFile, newFileBasePath, newFileName]);
 
     const runCode = async () => {
         setIsLoading(true); setIsError(false);
@@ -628,14 +736,21 @@ const EditorPage = () => {
         toast.success("Project downloaded!");
     };
 
-    const file        = filesRef.current[activeFileName];
     const fileTree    = buildFileTree(fileKeys);
     const currentLock = locks[activeFileName];
     const hasMyLock   = !!(currentLock && currentLock.socketId === currentSocketId);
     const isReadOnly  = !!activeFileName && !hasMyLock;
     const currentTyping = typingUsers[activeFileName];
     const isOtherTyping = !!(currentTyping && currentTyping.socketId !== currentSocketId);
-    const hasTape = sessionTape.length > 0;
+    const editorPath = activeFileName || "untitled.js";
+    const editorLanguage = useMemo(
+        () => filesRef.current[activeFileName]?.language || "javascript",
+        [activeFileName]
+    );
+    const editorInitialValue = useMemo(
+        () => filesRef.current[activeFileName]?.value || "",
+        [activeFileName]
+    );
     const editorOptions = useMemo(() => ({
         minimap: { enabled: false },
         fontSize: 14,
@@ -682,30 +797,75 @@ const EditorPage = () => {
             </div>
 
             {/* Main Workspace */}
-            <div style={{ display: 'flex', flex: 1, overflow: 'hidden', paddingBottom: hasTape ? '70px' : 0 }}>
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden', paddingBottom: '70px' }}>
 
                 {/* Sidebar */}
-                <div style={{ width: '220px', background: '#252526', borderRight: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
-                    <div style={{ padding: '10px 15px', color: '#bbb', fontSize: '11px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span>EXPLORER</span>
-                        <div style={{ display: 'flex', gap: '5px' }}>
-                            <button disabled={isReplaying} onClick={() => folderInputRef.current.click()} style={{ background: 'none', border: 'none', color: isReplaying ? '#666' : '#ccc', cursor: isReplaying ? 'not-allowed' : 'pointer', fontSize: '16px' }} title="Open Folder">📂</button>
-                            <button disabled={isReplaying} onClick={() => fileInputRef.current.click()}   style={{ background: 'none', border: 'none', color: isReplaying ? '#666' : '#ccc', cursor: isReplaying ? 'not-allowed' : 'pointer', fontSize: '16px' }} title="Upload File">📄</button>
-                            <button disabled={isReplaying} onClick={createNewFile}                        style={{ background: 'none', border: 'none', color: isReplaying ? '#666' : '#ccc', cursor: isReplaying ? 'not-allowed' : 'pointer', fontSize: '18px' }} title="New File">+</button>
-                        </div>
+                <div className="editorSidebar">
+                    <div className="activityRail">
+                        <button className="activityButton is-active" title="Explorer">E</button>
+                        <button className="activityButton" title="Search">S</button>
+                        <button className="activityButton" title="Session">T</button>
                     </div>
-                    <input type="file" multiple ref={fileInputRef}   style={{ display: 'none' }} onChange={handleUpload} />
-                    <input type="file" ref={folderInputRef} webkitdirectory="" directory="" style={{ display: 'none' }} onChange={handleUpload} />
-                    <div style={{ flex: 1, overflowY: 'auto', padding: '5px' }}>
-                        {renderTree(fileTree)}
+
+                    <div className="explorerPanel">
+                        <div className="explorerTitlebar">
+                            <span>EXPLORER</span>
+                            <div className="explorerActions">
+                                <button disabled={isReplaying} onClick={() => startCreateNewFile()} className="iconButton" title="New file">+</button>
+                                <button disabled={isReplaying} onClick={() => fileInputRef.current?.click()} className="iconButton" title="Upload file">↑</button>
+                                <button disabled={isReplaying} onClick={() => folderInputRef.current?.click()} className="iconButton" title="Upload folder">▣</button>
+                            </div>
+                        </div>
+
+                        <div className="workspaceHeader">
+                            <span className="workspaceChevron">▾</span>
+                            <span className="workspaceName">CODESYNC PROJECT</span>
+                            <span className="workspaceCount">{fileKeys.length}</span>
+                        </div>
+
+                        <input type="file" multiple ref={fileInputRef} style={{ display: 'none' }} onChange={handleUpload} />
+                        <input type="file" ref={folderInputRef} webkitdirectory="" directory="" style={{ display: 'none' }} onChange={handleUpload} />
+
+                        {isCreatingFile && (
+                            <form className="newFileForm" onSubmit={submitNewFile}>
+                                {newFileBasePath && <span className="newFileBase">{newFileBasePath}/</span>}
+                                <input
+                                    autoFocus
+                                    value={newFileName}
+                                    onChange={(e) => setNewFileName(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Escape') cancelCreateNewFile();
+                                    }}
+                                    placeholder={newFileBasePath ? 'file.js' : 'src/file.js'}
+                                    className="newFileInput"
+                                />
+                                <button type="submit" className="newFileSubmit" title="Create file">✓</button>
+                                <button type="button" onClick={cancelCreateNewFile} className="newFileCancel" title="Cancel">x</button>
+                            </form>
+                        )}
+
+                        <div className="fileTree">
+                            {fileKeys.length ? renderTree(fileTree) : (
+                                <div className="emptyExplorer">
+                                    <button disabled={isReplaying} onClick={() => startCreateNewFile()} className="emptyExplorerAction">
+                                        Create your first file
+                                    </button>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
 
                 {/* Editor + Output */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#1e1e1e' }}>
                     <div style={{ height: '35px', background: '#1e1e1e', display: 'flex', borderBottom: '1px solid #333', justifyContent: 'space-between' }}>
-                        <div style={{ padding: '0 15px', color: '#fff', display: 'flex', alignItems: 'center', borderTop: '2px solid #4aed88', fontSize: '13px', gap: '8px' }}>
-                            {activeFileName ? <>{getFileIcon(activeFileName)} {activeFileName.split('/').pop()}</> : "No File Selected"}
+                        <div className="editorTab">
+                            {activeFileName ? (
+                                <>
+                                    <span className={`fileTypeIcon ${getFileIconClass(activeFileName)}`}>{getFileIcon(activeFileName)}</span>
+                                    {activeFileName.split('/').pop()}
+                                </>
+                            ) : "No File Selected"}
                         </div>
                         {activeFileName && (
                             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0 15px', color: '#cfcfcf', fontSize: '12px', fontWeight: 'bold' }}>
@@ -744,12 +904,12 @@ const EditorPage = () => {
 
                     <div style={{ flex: 1, position: 'relative' }}>
                         {activeFileName ? (
-                            <Editor
+                            <StableEditor
                                 height="100%" width="100%"
                                 theme="vs-dark"
-                                path={file?.name || "untitled.js"}
-                                defaultLanguage={file?.language || "javascript"}
-                                defaultValue={file?.value || ""}
+                                path={editorPath}
+                                defaultLanguage={editorLanguage}
+                                defaultValue={editorInitialValue}
                                 onChange={handleEditorChange}
                                 onMount={handleEditorDidMount}
                                 options={editorOptions}
@@ -778,14 +938,12 @@ const EditorPage = () => {
                     </div>
                 </div>
             </div>
-            {hasTape && (
-                <SessionTape
-                    tape={sessionTape}
-                    onScrub={handleTapeScrub}
-                    isReplaying={isReplaying}
-                    onExitReplay={handleExitReplay}
-                />
-            )}
+            <SessionTape
+                tape={sessionTape}
+                onScrub={handleTapeScrub}
+                isReplaying={isReplaying}
+                onExitReplay={handleExitReplay}
+            />
         </div>
     );
 };

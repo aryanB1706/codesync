@@ -7,6 +7,7 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
     const [playSpeed, setPlaySpeed] = useState(500);
     const intervalRef = useRef(null);
     const maxIndex = Math.max(0, tape.length - 1);
+    const hasEvents = tape.length > 0;
     const visibleSliderIndex = isReplaying ? Math.min(sliderIndex, maxIndex) : maxIndex;
 
     useEffect(() => {
@@ -28,10 +29,31 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
         return () => clearInterval(intervalRef.current);
     }, [isPlaying, onScrub, playSpeed, tape.length]);
 
+    const togglePlayback = () => {
+        if (!hasEvents) return;
+
+        if (isPlaying) {
+            setIsPlaying(false);
+            return;
+        }
+
+        const startIndex = visibleSliderIndex >= maxIndex ? 0 : visibleSliderIndex;
+        setSliderIndex(startIndex);
+        onScrub(startIndex);
+        setIsPlaying(startIndex < maxIndex);
+    };
+
     const scrubTo = (index) => {
+        if (!hasEvents) return;
+
         const nextIndex = Math.max(0, Math.min(index, maxIndex));
         setSliderIndex(nextIndex);
         onScrub(nextIndex);
+    };
+
+    const exitReplay = () => {
+        setIsPlaying(false);
+        onExitReplay();
     };
 
     const formatTime = (timestamp) => (
@@ -49,7 +71,7 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
             {isReplaying && (
                 <div className="replay-banner">
                     <span>Replay Mode - Viewing history</span>
-                    <button className="exit-replay-btn" onClick={onExitReplay}>
+                    <button className="exit-replay-btn" onClick={exitReplay}>
                         Exit Replay
                     </button>
                 </div>
@@ -57,9 +79,10 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
 
             <div className="tape-controls">
                 <button
-                    className="tape-btn"
-                    onClick={() => setIsPlaying((playing) => !playing)}
+                    className="tape-btn play-btn"
+                    onClick={togglePlayback}
                     title={isPlaying ? 'Pause' : 'Auto-Play'}
+                    disabled={!hasEvents}
                     type="button"
                 >
                     {isPlaying ? 'Pause' : 'Play'}
@@ -69,6 +92,7 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
                     className="tape-btn"
                     onClick={() => scrubTo(visibleSliderIndex - 1)}
                     title="Step Back"
+                    disabled={!hasEvents}
                     type="button"
                 >
                     Back
@@ -78,6 +102,7 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
                     className="tape-btn"
                     onClick={() => scrubTo(visibleSliderIndex + 1)}
                     title="Step Forward"
+                    disabled={!hasEvents}
                     type="button"
                 >
                     Forward
@@ -91,6 +116,7 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
                         value={visibleSliderIndex}
                         onChange={(event) => scrubTo(Number(event.target.value))}
                         className="tape-slider"
+                        disabled={!hasEvents}
                     />
                     <div className="tape-markers">
                         {tape.map((event, index) => (
@@ -115,6 +141,7 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
                     value={playSpeed}
                     onChange={(event) => setPlaySpeed(Number(event.target.value))}
                     title="Playback Speed"
+                    disabled={!hasEvents}
                 >
                     <option value={1000}>0.5x</option>
                     <option value={500}>1x</option>
@@ -132,7 +159,7 @@ export default function SessionTape({ tape, onScrub, isReplaying, onExitReplay }
                 )}
 
                 {isReplaying && (
-                    <button className="tape-btn live-btn" onClick={onExitReplay} type="button">
+                    <button className="tape-btn live-btn" onClick={exitReplay} type="button">
                         Live
                     </button>
                 )}
