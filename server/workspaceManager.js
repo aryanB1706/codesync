@@ -7,6 +7,7 @@ const { deleteFileState, getRoomSnapshot, setFileText } = require('./ot');
 const WORKSPACES_ROOT = path.join(os.tmpdir(), 'codesync-workspaces');
 const MAX_FILE_BYTES = 1024 * 1024;
 const rooms = new Map();
+const INTERNAL_WRITE_IGNORE_MS = 500;
 
 const DEFAULT_FILES = {
     'src/App.js': "// React App Code\nconsole.log('App Started');",
@@ -118,7 +119,25 @@ const ensureWorkspaceWatcher = (io, roomId) => {
 
     const workspacePath = ensureWorkspace(roomId);
     let syncTimer = null;
-    const scheduleSync = () => {
+    const internalWrites = new Map();
+    const isInternalWrite = (changedPath) => {
+        if (!changedPath) return false;
+        const expiresAt = internalWrites.get(changedPath);
+        if (!expiresAt) return false;
+        if (expiresAt > Date.now()) return true;
+        internalWrites.delete(changedPath);
+        return false;
+    };
+    const markInternalWrite = (changedPath) => {
+        internalWrites.set(changedPath, Date.now() + INTERNAL_WRITE_IGNORE_MS);
+        setTimeout(() => {
+            if ((internalWrites.get(changedPath) || 0) <= Date.now()) {
+                internalWrites.delete(changedPath);
+            }
+        }, INTERNAL_WRITE_IGNORE_MS + 50);
+    };
+    const scheduleSync = (changedPath) => {
+        if (isInternalWrite(changedPath)) return;
         clearTimeout(syncTimer);
         syncTimer = setTimeout(() => emitWorkspaceSync(io, roomId), 120);
     };
@@ -139,7 +158,7 @@ const ensureWorkspaceWatcher = (io, roomId) => {
         .on('addDir', scheduleSync)
         .on('unlinkDir', scheduleSync);
 
-    const roomState = { watcher, workspacePath };
+    const roomState = { watcher, workspacePath, markInternalWrite };
     rooms.set(roomId, roomState);
     return roomState;
 };
@@ -150,6 +169,15 @@ const writeWorkspaceFile = (roomId, relativePath, value = '') => {
 
     const workspacePath = ensureWorkspace(roomId);
     const filePath = path.join(workspacePath, safePath);
+    const roomState = rooms.get(roomId);
+    if (roomState?.markInternalWrite) {
+        let currentPath = filePath;
+        while (currentPath && currentPath.startsWith(workspacePath)) {
+            roomState.markInternalWrite(currentPath);
+            if (currentPath === workspacePath) break;
+            currentPath = path.dirname(currentPath);
+        }
+    }
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, value || '', 'utf8');
 };
@@ -160,6 +188,15 @@ const deleteWorkspacePath = (roomId, relativePath) => {
 
     const targetPath = path.join(ensureWorkspace(roomId), safePath);
     if (fs.existsSync(targetPath)) {
+        const roomState = rooms.get(roomId);
+        if (roomState?.markInternalWrite) {
+            let currentPath = targetPath;
+            while (currentPath && currentPath.startsWith(roomState.workspacePath)) {
+                roomState.markInternalWrite(currentPath);
+                if (currentPath === roomState.workspacePath) break;
+                currentPath = path.dirname(currentPath);
+            }
+        }
         fs.rmSync(targetPath, { recursive: true, force: true });
     }
 };

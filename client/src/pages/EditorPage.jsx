@@ -368,6 +368,7 @@ const EditorPage = () => {
     const currentSocketIdRef = useRef(null);
     const clientRevisionsRef = useRef({});
     const pendingOperationsRef = useRef({});
+    const inFlightOperationsRef = useRef({});
     const operationSequenceRef = useRef(0);
 
     const [clients, setClients]     = useState([]);
@@ -444,6 +445,26 @@ const EditorPage = () => {
 
         applyFileStoreToEditor(replayStore, activeFileNameRef.current);
     }, [applyFileStoreToEditor]);
+
+    const flushPendingOperation = useCallback((fileName) => {
+        const socket = socketRef.current;
+        if (!socket || !fileName || inFlightOperationsRef.current[fileName]) return;
+
+        const pendingForFile = pendingOperationsRef.current[fileName] || [];
+        const nextOperation = pendingForFile.find((operation) => !operation.sent);
+        if (!nextOperation) return;
+
+        nextOperation.sent = true;
+        inFlightOperationsRef.current[fileName] = nextOperation.operationId;
+
+        socket.emit('ot_operation', {
+            roomId,
+            fileName,
+            operation: nextOperation,
+            lastKnownRevision: clientRevisionsRef.current[fileName] || 0,
+            baseText: filesRef.current[fileName]?.value || '',
+        });
+    }, [roomId]);
 
     const applyFilesystemSync = useCallback(({ files = {}, folders = [] }) => {
         if (isReplayingRef.current) return;
@@ -590,15 +611,17 @@ const EditorPage = () => {
             });
 
             socketRef.current.on('ot_ack', ({ fileName, operationId, revision, text }) => {
+                inFlightOperationsRef.current[fileName] = null;
                 pendingOperationsRef.current[fileName] = (pendingOperationsRef.current[fileName] || [])
                     .filter((operation) => operation.operationId !== operationId);
 
-                if (filesRef.current[fileName] && typeof text === 'string') {
+                const pendingForFile = pendingOperationsRef.current[fileName] || [];
+                if (filesRef.current[fileName] && typeof text === 'string' && pendingForFile.length === 0) {
                     filesRef.current[fileName].value = text;
 
                     if (editorRef.current && activeFileNameRef.current === fileName) {
                         const model = editorRef.current.getModel();
-                        if (model && model.getValue() !== text && pendingOperationsRef.current[fileName].length === 0) {
+                        if (model && model.getValue() !== text) {
                             isRemoteChangeRef.current = true;
                             try {
                                 const edit = getMinimalEdit(model, text);
@@ -617,11 +640,14 @@ const EditorPage = () => {
                     [fileName]: revision,
                 };
                 setClientRevisions(clientRevisionsRef.current);
+                flushPendingOperation(fileName);
             });
 
             socketRef.current.on('ot_rejected', ({ fileName, reason }) => {
+                inFlightOperationsRef.current[fileName] = null;
                 pendingOperationsRef.current[fileName] = [];
                 toast.error(reason || `${fileName} OT operation was rejected.`);
+                socketRef.current?.emit('ot_request_state', { roomId });
             });
 
             socketRef.current.on('ot_broadcast', ({ fileName, operation, revision }) => {
@@ -636,6 +662,10 @@ const EditorPage = () => {
                 if (filesRef.current[fileName]) {
                     filesRef.current[fileName].value = applyTextOperation(filesRef.current[fileName].value, localOperation);
                 }
+
+                pendingOperationsRef.current[fileName] = pendingForFile.map((pendingOperation) => (
+                    transformOperation(pendingOperation, operation)
+                ));
 
                 if (editorRef.current && activeFileNameRef.current === fileName) {
                     const model = editorRef.current.getModel();
@@ -756,7 +786,7 @@ const EditorPage = () => {
             socketRef.current?.emit('lock_file', { roomId, fileName: null });
             socketRef.current?.disconnect();
         };
-    }, [applyFilesystemSync, applyReplayFiles, roomId, username]);
+    }, [applyFilesystemSync, applyReplayFiles, flushPendingOperation, roomId, username]);
 
     // ── EDITOR MOUNT ─────────────────────────────────────────────────────────
     const handleEditorDidMount = useCallback((editor) => {
@@ -815,7 +845,6 @@ const EditorPage = () => {
         const fileName = activeFileNameRef.current;
         if (!fileName || !filesRef.current[fileName]) return;
 
-        const previousCode = filesRef.current[fileName].value || '';
         const code = value ?? '';
         filesRef.current[fileName].value = code;
 
@@ -848,21 +877,15 @@ const EditorPage = () => {
                     ...partialOperation,
                     operationId: `${currentSocketIdRef.current || 'local'}:${Date.now()}:${operationSequenceRef.current += 1}`,
                     clientId: currentSocketIdRef.current,
+                    sent: false,
                 };
 
                 pendingOperationsRef.current[fileName] = [
                     ...(pendingOperationsRef.current[fileName] || []),
                     operation,
                 ];
-
-                socketRef.current?.emit('ot_operation', {
-                    roomId,
-                    fileName,
-                    operation,
-                    lastKnownRevision: clientRevisionsRef.current[fileName] || 0,
-                    baseText: previousCode,
-                });
             });
+            flushPendingOperation(fileName);
             return;
         }
 
@@ -881,7 +904,7 @@ const EditorPage = () => {
         emitTimerRef.current = setTimeout(() => {
             socketRef.current?.emit('code_change', { roomId, fileName, code });
         }, 30);
-    }, [roomId]);
+    }, [flushPendingOperation, roomId]);
 
     // ── HELPERS ───────────────────────────────────────────────────────────────
     const buildFileTree = (keys, folders = []) => {
