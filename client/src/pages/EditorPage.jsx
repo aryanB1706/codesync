@@ -7,6 +7,7 @@ import toast from 'react-hot-toast';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import SessionTape from '../components/SessionTape';
+import Terminal from '../components/Terminal';
 import './EditorPage.css';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
@@ -29,11 +30,8 @@ const FileTreeNode = ({
     const isFolder = nodes !== null;
     const fullPath = path ? `${path}/${fileName}` : fileName;
     const hasActiveChild = isFolder && !!activeFileName && (activeFileName === fullPath || activeFileName.startsWith(`${fullPath}/`));
-    const [isOpen, setIsOpen] = useState(hasActiveChild);
-
-    useEffect(() => {
-        if (hasActiveChild) setIsOpen(true);
-    }, [hasActiveChild]);
+    const [isManuallyOpen, setIsManuallyOpen] = useState(hasActiveChild);
+    const isOpen = isManuallyOpen || hasActiveChild;
 
     const handleDeleteClick = (e) => {
         e.stopPropagation();
@@ -73,7 +71,7 @@ const FileTreeNode = ({
     return (
         <div className="fileTree-folderGroup">
             <div
-                onClick={() => setIsOpen(!isOpen)}
+                onClick={() => setIsManuallyOpen(!isOpen)}
                 className={`fileTree-row fileTree-folder ${hasActiveChild ? 'has-active-child' : ''}`}
                 style={{ '--depth': depth }}
                 title={fullPath}
@@ -89,7 +87,7 @@ const FileTreeNode = ({
                         onClick={(e) => {
                             e.stopPropagation();
                             onNewFile(fullPath);
-                            setIsOpen(true);
+                            setIsManuallyOpen(true);
                         }}
                         title={`New file in ${fileName}`}
                     >
@@ -213,6 +211,123 @@ const applyTapeEventToFileStore = (fileStore, event) => {
     }
 };
 
+const getParentFolders = (filePath) => {
+    const parts = String(filePath || '').split('/').filter(Boolean);
+    const folders = [];
+
+    for (let index = 1; index < parts.length; index += 1) {
+        folders.push(parts.slice(0, index).join('/'));
+    }
+
+    return folders;
+};
+
+const getOperationLength = (operation) => (
+    operation.type === 'insert'
+        ? (operation.text || '').length
+        : (operation.length || (operation.text || '').length)
+);
+
+const applyTextOperation = (value, operation) => {
+    if (!operation || operation.noop) return value;
+
+    const index = Math.max(0, Math.min(operation.index || 0, value.length));
+    if (operation.type === 'insert') {
+        return `${value.slice(0, index)}${operation.text || ''}${value.slice(index)}`;
+    }
+    if (operation.type === 'delete') {
+        return `${value.slice(0, index)}${value.slice(index + getOperationLength(operation))}`;
+    }
+    return value;
+};
+
+const transformPositionAgainstDelete = (position, deleteOperation) => {
+    const deleteStart = deleteOperation.index || 0;
+    const deleteEnd = deleteStart + getOperationLength(deleteOperation);
+
+    if (position <= deleteStart) return position;
+    if (position >= deleteEnd) return position - (deleteEnd - deleteStart);
+    return deleteStart;
+};
+
+const compareOperationTieBreaker = (incoming, applied) => {
+    const incomingKey = `${incoming.clientId || ''}:${incoming.operationId || ''}`;
+    const appliedKey = `${applied.clientId || ''}:${applied.operationId || ''}`;
+    if (incomingKey === appliedKey) return 0;
+    return incomingKey < appliedKey ? -1 : 1;
+};
+
+const transformOperation = (incomingOperation, appliedOperation) => {
+    const incoming = { ...incomingOperation };
+    const applied = { ...appliedOperation };
+
+    if (incoming.noop) return incoming;
+
+    if (incoming.type === 'insert' && applied.type === 'insert') {
+        const appliedWinsTie = incoming.index === applied.index && compareOperationTieBreaker(incoming, applied) > 0;
+        if (applied.index < incoming.index || appliedWinsTie) {
+            incoming.index += getOperationLength(applied);
+        }
+        return incoming;
+    }
+
+    if (incoming.type === 'insert' && applied.type === 'delete') {
+        incoming.index = transformPositionAgainstDelete(incoming.index, applied);
+        return incoming;
+    }
+
+    if (incoming.type === 'delete' && applied.type === 'insert') {
+        if (applied.index <= incoming.index) {
+            incoming.index += getOperationLength(applied);
+        } else if (applied.index < incoming.index + getOperationLength(incoming)) {
+            incoming.length += getOperationLength(applied);
+        }
+        return incoming;
+    }
+
+    if (incoming.type === 'delete' && applied.type === 'delete') {
+        const start = incoming.index;
+        const end = incoming.index + getOperationLength(incoming);
+        const nextStart = transformPositionAgainstDelete(start, applied);
+        const nextEnd = transformPositionAgainstDelete(end, applied);
+        incoming.index = nextStart;
+        incoming.length = Math.max(0, nextEnd - nextStart);
+        incoming.noop = incoming.length === 0;
+    }
+
+    return incoming;
+};
+
+const operationToMonacoEdit = (model, operation) => {
+    const index = Math.max(0, Math.min(operation.index || 0, model.getValueLength()));
+    const start = model.getPositionAt(index);
+
+    if (operation.type === 'insert') {
+        return {
+            range: {
+                startLineNumber: start.lineNumber,
+                startColumn: start.column,
+                endLineNumber: start.lineNumber,
+                endColumn: start.column,
+            },
+            text: operation.text || '',
+            forceMoveMarkers: true,
+        };
+    }
+
+    const end = model.getPositionAt(Math.min(index + getOperationLength(operation), model.getValueLength()));
+    return {
+        range: {
+            startLineNumber: start.lineNumber,
+            startColumn: start.column,
+            endLineNumber: end.lineNumber,
+            endColumn: end.column,
+        },
+        text: '',
+        forceMoveMarkers: true,
+    };
+};
+
 const EditorPage = () => {
     const socketRef = useRef(null);
     const location = useLocation();
@@ -236,6 +351,7 @@ const EditorPage = () => {
         "style.css":  { name: "style.css",  language: "css",        value: "body { background: #000; }" }
     });
     const [fileKeys, setFileKeys] = useState(["src/App.js", "style.css"]);
+    const [folderKeys, setFolderKeys] = useState(["src"]);
 
     const activeFileNameRef = useRef("src/App.js");
     const [activeFileName, setActiveFileName] = useState("src/App.js");
@@ -250,6 +366,9 @@ const EditorPage = () => {
     const typingActiveRef = useRef(false);
     const locksRef = useRef({});
     const currentSocketIdRef = useRef(null);
+    const clientRevisionsRef = useRef({});
+    const pendingOperationsRef = useRef({});
+    const operationSequenceRef = useRef(0);
 
     const [clients, setClients]     = useState([]);
     const [locks, setLocks]         = useState({});
@@ -264,11 +383,13 @@ const EditorPage = () => {
     const [isCreatingFile, setIsCreatingFile] = useState(false);
     const [newFileBasePath, setNewFileBasePath] = useState('');
     const [newFileName, setNewFileName] = useState('');
+    const [clientRevisions, setClientRevisions] = useState({});
 
     useEffect(() => { activeFileNameRef.current = activeFileName; }, [activeFileName]);
     useEffect(() => { locksRef.current = locks; }, [locks]);
     useEffect(() => { currentSocketIdRef.current = currentSocketId; }, [currentSocketId]);
     useEffect(() => { isReplayingRef.current = isReplaying; }, [isReplaying]);
+    useEffect(() => { clientRevisionsRef.current = clientRevisions; }, [clientRevisions]);
 
     useEffect(() => {
         if (!location.state) { toast.error("Username is required"); navigate('/'); }
@@ -324,6 +445,54 @@ const EditorPage = () => {
         applyFileStoreToEditor(replayStore, activeFileNameRef.current);
     }, [applyFileStoreToEditor]);
 
+    const applyFilesystemSync = useCallback(({ files = {}, folders = [] }) => {
+        if (isReplayingRef.current) return;
+
+        const nextStore = {};
+        Object.entries(files).forEach(([fileName, value]) => {
+            nextStore[fileName] = {
+                name: fileName,
+                language: getLang(fileName),
+                value: value || '',
+            };
+        });
+
+        const nextFileKeys = Object.keys(nextStore);
+        const nextFolderKeys = Array.from(new Set([
+            ...folders,
+            ...nextFileKeys.flatMap(getParentFolders),
+        ])).sort();
+
+        filesRef.current = nextStore;
+        setFileKeys(nextFileKeys);
+        setFolderKeys(nextFolderKeys);
+
+        const currentActive = activeFileNameRef.current;
+        const nextActive = nextStore[currentActive]
+            ? currentActive
+            : nextFileKeys[0] || '';
+
+        if (nextActive !== currentActive) {
+            activeFileNameRef.current = nextActive;
+            setActiveFileName(nextActive);
+        }
+
+        if (editorRef.current) {
+            const nextValue = nextActive ? nextStore[nextActive]?.value || '' : '';
+            const model = editorRef.current.getModel();
+            if (model && model.getValue() !== nextValue) {
+                isRemoteChangeRef.current = true;
+                try {
+                    model.setValue(nextValue);
+                } finally {
+                    queueMicrotask(() => {
+                        isRemoteChangeRef.current = false;
+                    });
+                }
+            }
+        }
+    }, []);
+
     const handleTapeScrub = useCallback((eventIndex) => {
         if (!socketRef.current) return;
 
@@ -342,8 +511,7 @@ const EditorPage = () => {
         isReplayingRef.current = false;
         setIsReplaying(false);
         applyFileStoreToEditor(liveStore, activeFileNameRef.current);
-        socketRef.current?.emit('lock_file', { roomId, fileName: activeFileNameRef.current || null });
-    }, [applyFileStoreToEditor, cloneCurrentFiles, roomId]);
+    }, [applyFileStoreToEditor, cloneCurrentFiles]);
 
     // ── SOCKET SETUP ─────────────────────────────────────────────────────────
     useEffect(() => {
@@ -371,8 +539,6 @@ const EditorPage = () => {
                 setCurrentSocketId(socketId);
             });
             socketRef.current.on('connect_error', () => toast.error('Socket connection failed'));
-            socketRef.current.emit('join', { roomId, username, location: userLocation });
-            socketRef.current.emit('request-tape', { roomId });
 
             socketRef.current.on('joined', ({ clients, username: joinedUsername, locks }) => {
                 if (joinedUsername !== username) toast.success(`${joinedUsername} joined.`);
@@ -380,9 +546,6 @@ const EditorPage = () => {
                 if (locks) {
                     locksRef.current = locks;
                     setLocks(locks);
-                }
-                if (joinedUsername === username) {
-                    socketRef.current?.emit('lock_file', { roomId, fileName: activeFileNameRef.current });
                 }
             });
 
@@ -392,8 +555,107 @@ const EditorPage = () => {
             });
             socketRef.current.on('typing_updated', (typing) => setTypingUsers(typing || {}));
 
+            socketRef.current.on('filesystem:sync', applyFilesystemSync);
+
             socketRef.current.on('lock_denied', ({ fileName, lock }) => {
                 toast.error(`${fileName} is already being edited by ${lock.username}`);
+            });
+
+            socketRef.current.on('ot_state', ({ files }) => {
+                Object.entries(files || {}).forEach(([fileName, fileState]) => {
+                    if (!filesRef.current[fileName]) return;
+
+                    filesRef.current[fileName].value = fileState.text || '';
+                    clientRevisionsRef.current = {
+                        ...clientRevisionsRef.current,
+                        [fileName]: fileState.revision || 0,
+                    };
+
+                    if (editorRef.current && activeFileNameRef.current === fileName) {
+                        const model = editorRef.current.getModel();
+                        if (model && model.getValue() !== fileState.text) {
+                            isRemoteChangeRef.current = true;
+                            try {
+                                const edit = getMinimalEdit(model, fileState.text || '');
+                                if (edit) editorRef.current.executeEdits('ot-state', [edit]);
+                            } finally {
+                                queueMicrotask(() => {
+                                    isRemoteChangeRef.current = false;
+                                });
+                            }
+                        }
+                    }
+                });
+                setClientRevisions(clientRevisionsRef.current);
+            });
+
+            socketRef.current.on('ot_ack', ({ fileName, operationId, revision, text }) => {
+                pendingOperationsRef.current[fileName] = (pendingOperationsRef.current[fileName] || [])
+                    .filter((operation) => operation.operationId !== operationId);
+
+                if (filesRef.current[fileName] && typeof text === 'string') {
+                    filesRef.current[fileName].value = text;
+
+                    if (editorRef.current && activeFileNameRef.current === fileName) {
+                        const model = editorRef.current.getModel();
+                        if (model && model.getValue() !== text && pendingOperationsRef.current[fileName].length === 0) {
+                            isRemoteChangeRef.current = true;
+                            try {
+                                const edit = getMinimalEdit(model, text);
+                                if (edit) editorRef.current.executeEdits('ot-ack', [edit]);
+                            } finally {
+                                queueMicrotask(() => {
+                                    isRemoteChangeRef.current = false;
+                                });
+                            }
+                        }
+                    }
+                }
+
+                clientRevisionsRef.current = {
+                    ...clientRevisionsRef.current,
+                    [fileName]: revision,
+                };
+                setClientRevisions(clientRevisionsRef.current);
+            });
+
+            socketRef.current.on('ot_rejected', ({ fileName, reason }) => {
+                pendingOperationsRef.current[fileName] = [];
+                toast.error(reason || `${fileName} OT operation was rejected.`);
+            });
+
+            socketRef.current.on('ot_broadcast', ({ fileName, operation, revision }) => {
+                if (isReplayingRef.current || !operation) return;
+
+                const pendingForFile = pendingOperationsRef.current[fileName] || [];
+                const localOperation = pendingForFile.reduce(
+                    (transformed, pendingOperation) => transformOperation(transformed, pendingOperation),
+                    operation
+                );
+
+                if (filesRef.current[fileName]) {
+                    filesRef.current[fileName].value = applyTextOperation(filesRef.current[fileName].value, localOperation);
+                }
+
+                if (editorRef.current && activeFileNameRef.current === fileName) {
+                    const model = editorRef.current.getModel();
+                    if (model && !localOperation.noop) {
+                        isRemoteChangeRef.current = true;
+                        try {
+                            editorRef.current.executeEdits('remote-ot', [operationToMonacoEdit(model, localOperation)]);
+                        } finally {
+                            queueMicrotask(() => {
+                                isRemoteChangeRef.current = false;
+                            });
+                        }
+                    }
+                }
+
+                clientRevisionsRef.current = {
+                    ...clientRevisionsRef.current,
+                    [fileName]: revision,
+                };
+                setClientRevisions(clientRevisionsRef.current);
             });
 
             // ── REMOTE CODE CHANGE ───────────────────────────────────────────
@@ -437,6 +699,10 @@ const EditorPage = () => {
 
                 filesRef.current[fileName] = { name: fileName, language, value };
                 setFileKeys(Object.keys(filesRef.current));
+                setFolderKeys((prev) => Array.from(new Set([
+                    ...prev,
+                    ...getParentFolders(fileName),
+                ])).sort());
             });
 
             socketRef.current.on('file_deleted', ({ id }) => {
@@ -446,6 +712,7 @@ const EditorPage = () => {
                     if (k === id || k.startsWith(id + '/')) delete filesRef.current[k];
                 });
                 setFileKeys(Object.keys(filesRef.current));
+                setFolderKeys((prev) => prev.filter(folder => folder !== id && !folder.startsWith(id + '/')));
             });
 
             socketRef.current.on('tape-snapshot', (tape) => {
@@ -473,6 +740,10 @@ const EditorPage = () => {
                 toast.success(`${username} left.`);
                 setClients(prev => prev.filter(c => c.socketId !== socketId));
             });
+
+            socketRef.current.emit('join', { roomId, username, location: userLocation });
+            socketRef.current.emit('request-tape', { roomId });
+            socketRef.current.emit('ot_request_state', { roomId });
         };
 
         initSocket();
@@ -485,7 +756,7 @@ const EditorPage = () => {
             socketRef.current?.emit('lock_file', { roomId, fileName: null });
             socketRef.current?.disconnect();
         };
-    }, [applyReplayFiles, roomId, username]);
+    }, [applyFilesystemSync, applyReplayFiles, roomId, username]);
 
     // ── EDITOR MOUNT ─────────────────────────────────────────────────────────
     const handleEditorDidMount = useCallback((editor) => {
@@ -517,9 +788,6 @@ const EditorPage = () => {
             isRemoteChangeRef.current = false;
         }
 
-        if (!isReplayingRef.current) {
-            socketRef.current?.emit('lock_file', { roomId, fileName: path });
-        }
     }, [roomId]);
 
     const handleRequestLock = useCallback(() => {
@@ -540,17 +808,63 @@ const EditorPage = () => {
     // ── TYPING ───────────────────────────────────────────────────────────────
     // NO setState. Only update ref + debounced socket emit.
     // This is why there's zero flicker when you type.
-    const handleEditorChange = useCallback((value) => {
+    const handleEditorChange = useCallback((value, event) => {
         if (isRemoteChangeRef.current) return;
         if (isReplayingRef.current) return;
 
         const fileName = activeFileNameRef.current;
         if (!fileName || !filesRef.current[fileName]) return;
 
+        const previousCode = filesRef.current[fileName].value || '';
         const code = value ?? '';
         filesRef.current[fileName].value = code;
 
-        if (locksRef.current[fileName]?.socketId !== currentSocketIdRef.current) return;
+        const fileLock = locksRef.current[fileName];
+        if (fileLock && fileLock.socketId !== currentSocketIdRef.current) return;
+
+        if (!fileLock) {
+            const changes = [...(event?.changes || [])].sort((a, b) => b.rangeOffset - a.rangeOffset);
+            const nextOperations = [];
+
+            changes.forEach((change) => {
+                if (change.rangeLength > 0) {
+                    nextOperations.push({
+                        type: 'delete',
+                        index: change.rangeOffset,
+                        length: change.rangeLength,
+                    });
+                }
+                if (change.text) {
+                    nextOperations.push({
+                        type: 'insert',
+                        index: change.rangeOffset,
+                        text: change.text,
+                    });
+                }
+            });
+
+            nextOperations.forEach((partialOperation) => {
+                const operation = {
+                    ...partialOperation,
+                    operationId: `${currentSocketIdRef.current || 'local'}:${Date.now()}:${operationSequenceRef.current += 1}`,
+                    clientId: currentSocketIdRef.current,
+                };
+
+                pendingOperationsRef.current[fileName] = [
+                    ...(pendingOperationsRef.current[fileName] || []),
+                    operation,
+                ];
+
+                socketRef.current?.emit('ot_operation', {
+                    roomId,
+                    fileName,
+                    operation,
+                    lastKnownRevision: clientRevisionsRef.current[fileName] || 0,
+                    baseText: previousCode,
+                });
+            });
+            return;
+        }
 
         if (!typingActiveRef.current) {
             typingActiveRef.current = true;
@@ -570,8 +884,16 @@ const EditorPage = () => {
     }, [roomId]);
 
     // ── HELPERS ───────────────────────────────────────────────────────────────
-    const buildFileTree = (keys) => {
+    const buildFileTree = (keys, folders = []) => {
         const root = {};
+        folders.forEach((folderPath) => {
+            const parts = folderPath.split('/').filter(Boolean);
+            let cur = root;
+            parts.forEach((part) => {
+                cur[part] = cur[part] || {};
+                cur = cur[part];
+            });
+        });
         keys.forEach((path) => {
             const parts = path.split('/');
             let cur = root;
@@ -593,6 +915,7 @@ const EditorPage = () => {
             if (k === pathToDelete || k.startsWith(pathToDelete + '/')) delete filesRef.current[k];
         });
         setFileKeys(Object.keys(filesRef.current));
+        setFolderKeys((prev) => prev.filter(folder => folder !== pathToDelete && !folder.startsWith(pathToDelete + '/')));
         socketRef.current?.emit('file_deleted', { roomId, id: pathToDelete });
         if (activeFileNameRef.current === pathToDelete || activeFileNameRef.current.startsWith(pathToDelete + '/')) {
             activeFileNameRef.current = "";
@@ -643,6 +966,10 @@ const EditorPage = () => {
             socketRef.current?.emit('file_created', { roomId, fileName: fd.name, language: fd.language, value: fd.value });
         }
         setFileKeys(Object.keys(filesRef.current));
+        setFolderKeys((prev) => Array.from(new Set([
+            ...prev,
+            ...Object.keys(filesRef.current).flatMap(getParentFolders),
+        ])).sort());
         toast.success("Uploaded successfully!");
     };
 
@@ -674,6 +1001,10 @@ const EditorPage = () => {
         const nf = { name: fileName, language: getLang(fileName), value: `// ${fileName}` };
         filesRef.current[fileName] = nf;
         setFileKeys(Object.keys(filesRef.current));
+        setFolderKeys((prev) => Array.from(new Set([
+            ...prev,
+            ...getParentFolders(fileName),
+        ])).sort());
         handleFileSelect(fileName);
         socketRef.current?.emit('file_created', { roomId, fileName, language: nf.language, value: nf.value });
         toast.success(`${fileName} created`);
@@ -722,7 +1053,10 @@ const EditorPage = () => {
             const r = res.data.run;
             if (r.signal) { setOutput(`Error: ${r.signal}`); setIsError(true); }
             else { setOutput(r.output || r.stderr || "No Output"); if (r.stderr) setIsError(true); }
-        } catch { setOutput("Error: Failed to execute code."); setIsError(true); }
+        } catch (error) {
+            setOutput(`Error: ${error.response?.data?.error || error.message || "Failed to execute code."}`);
+            setIsError(true);
+        }
         finally { setIsLoading(false); }
     };
 
@@ -736,10 +1070,10 @@ const EditorPage = () => {
         toast.success("Project downloaded!");
     };
 
-    const fileTree    = buildFileTree(fileKeys);
+    const fileTree    = buildFileTree(fileKeys, folderKeys);
     const currentLock = locks[activeFileName];
     const hasMyLock   = !!(currentLock && currentLock.socketId === currentSocketId);
-    const isReadOnly  = !!activeFileName && !hasMyLock;
+    const isReadOnly  = !!(activeFileName && currentLock && !hasMyLock);
     const currentTyping = typingUsers[activeFileName];
     const isOtherTyping = !!(currentTyping && currentTyping.socketId !== currentSocketId);
     const editorPath = activeFileName || "untitled.js";
@@ -764,40 +1098,40 @@ const EditorPage = () => {
     if (!location.state) return null;
 
     return (
-        <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#1e1e1e', overflow: 'hidden' }}>
+        <div className="editorShell">
 
             {/* Header */}
-            <div style={{ height: '50px', background: '#333333', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 15px', borderBottom: '1px solid #252526' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <div style={{ background: '#4aed88', width: '20px', height: '20px', borderRadius: '4px' }}></div>
-                    <span style={{ fontWeight: '600', color: '#ccc', letterSpacing: '1px' }}>CodeSync Pro</span>
+            <div className="topBar">
+                <div className="brandMark">
+                    <div className="brandLogo">CS</div>
+                    <span className="brandName">CodeSync</span>
                 </div>
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                    <div style={{ position: 'relative' }}>
+                <div className="topActions">
+                    <div className="memberMenu">
                         <button onClick={() => setShowUsers(p => !p)}
-                            style={{ background: '#444', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                            👥 Users ({clients.length})
+                            className="topButton">
+                            Users ({clients.length})
                         </button>
                         {showUsers && (
-                            <div style={{ position: 'absolute', top: '35px', right: '0', background: '#252526', border: '1px solid #444', borderRadius: '6px', width: '250px', zIndex: 10, padding: '10px', boxShadow: '0 4px 10px rgba(0,0,0,0.5)' }}>
-                                <div style={{ fontSize: '11px', color: '#888', marginBottom: '8px', fontWeight: 'bold' }}>ACTIVE MEMBERS</div>
+                            <div className="membersDropdown">
+                                <div className="membersTitle">ACTIVE MEMBERS</div>
                                 {clients.map(client => (
-                                    <div key={client.socketId} style={{ display: 'flex', flexDirection: 'column', padding: '5px 0', borderBottom: '1px solid #333' }}>
-                                        <div style={{ color: '#4aed88', fontSize: '13px', fontWeight: 'bold' }}>{client.username} {client.socketId === currentSocketId ? '(You)' : ''}</div>
-                                        <div style={{ color: '#aaa', fontSize: '11px' }}>📍 {client.location || 'Unknown'}</div>
+                                    <div key={client.socketId} className="memberRow">
+                                        <div className="memberName">{client.username} {client.socketId === currentSocketId ? '(You)' : ''}</div>
+                                        <div className="memberLocation">{client.location || 'Unknown'}</div>
                                     </div>
                                 ))}
                             </div>
                         )}
                     </div>
-                    <button onClick={downloadZip} style={{ background: '#333', color: '#fff', border: '1px solid #555', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>📥 Zip</button>
+                    <button onClick={downloadZip} className="topButton topButtonSecondary">Zip</button>
                     <button onClick={() => { navigator.clipboard.writeText(roomId); toast.success('Room ID copied'); }}
-                        style={{ background: '#444', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Copy ID</button>
+                        className="topButton">Copy ID</button>
                 </div>
             </div>
 
             {/* Main Workspace */}
-            <div style={{ display: 'flex', flex: 1, overflow: 'hidden', paddingBottom: '70px' }}>
+            <div className="workspaceBody">
 
                 {/* Sidebar */}
                 <div className="editorSidebar">
@@ -845,7 +1179,7 @@ const EditorPage = () => {
                         )}
 
                         <div className="fileTree">
-                            {fileKeys.length ? renderTree(fileTree) : (
+                            {(fileKeys.length || folderKeys.length) ? renderTree(fileTree) : (
                                 <div className="emptyExplorer">
                                     <button disabled={isReplaying} onClick={() => startCreateNewFile()} className="emptyExplorerAction">
                                         Create your first file
@@ -857,8 +1191,8 @@ const EditorPage = () => {
                 </div>
 
                 {/* Editor + Output */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#1e1e1e' }}>
-                    <div style={{ height: '35px', background: '#1e1e1e', display: 'flex', borderBottom: '1px solid #333', justifyContent: 'space-between' }}>
+                <div className="editorMain">
+                    <div className="editorTopStrip">
                         <div className="editorTab">
                             {activeFileName ? (
                                 <>
@@ -868,33 +1202,33 @@ const EditorPage = () => {
                             ) : "No File Selected"}
                         </div>
                         {activeFileName && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0 15px', color: '#cfcfcf', fontSize: '12px', fontWeight: 'bold' }}>
+                            <div className="editorStatus">
                                 {currentLock ? (
                                     currentLock.socketId === currentSocketId ? (
                                         <>
-                                            <span style={{ color: '#4aed88' }}>✏️ You are editing</span>
+                                            <span className="statusPill statusPillGood">You are editing</span>
                                             <button
                                                 onClick={handleReleaseLock}
                                                 disabled={isReplaying}
-                                                style={{ background: '#3a3a3a', color: '#fff', border: '1px solid #555', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px' }}
+                                                className="statusButton"
                                             >
                                                 Unlock
                                             </button>
                                         </>
                                     ) : (
-                                        <span style={{ color: isOtherTyping ? '#fbbf24' : '#f14c4c' }}>
-                                            {isOtherTyping ? `${currentTyping.username} is typing...` : `🔒 Locked by ${currentLock.username} (View Only)`}
+                                        <span className={`statusPill ${isOtherTyping ? 'statusPillWarn' : 'statusPillDanger'}`}>
+                                            {isOtherTyping ? `${currentTyping.username} is typing...` : `Locked by ${currentLock.username}`}
                                         </span>
                                     )
                                 ) : (
                                     <>
-                                        <span style={{ color: '#aaa' }}>View only</span>
+                                        <span className="statusMeta">Collaborative OT · rev {clientRevisions[activeFileName] || 0}</span>
                                         <button
                                             onClick={handleRequestLock}
                                             disabled={isReplaying}
-                                            style={{ background: '#0e639c', color: '#fff', border: 'none', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold' }}
+                                            className="statusButton statusButtonPrimary"
                                         >
-                                            Lock to edit
+                                            Lock exclusive
                                         </button>
                                     </>
                                 )}
@@ -902,7 +1236,7 @@ const EditorPage = () => {
                         )}
                     </div>
 
-                    <div style={{ flex: 1, position: 'relative' }}>
+                    <div className="editorCanvas">
                         {activeFileName ? (
                             <StableEditor
                                 height="100%" width="100%"
@@ -915,26 +1249,38 @@ const EditorPage = () => {
                                 options={editorOptions}
                             />
                         ) : (
-                            <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#555' }}>
+                            <div className="emptyEditorState">
                                 Select a file to edit
                             </div>
                         )}
                     </div>
 
-                    <div style={{ height: '200px', background: '#1e1e1e', borderTop: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
-                        <div style={{ padding: '5px 15px', fontSize: '11px', color: '#aaa', borderBottom: '1px solid #2d2d2d', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between' }}>
-                            <span>OUTPUT</span>
-                            <div style={{ display: 'flex', gap: '10px' }}>
-                                {output && <span onClick={() => setOutput("")} style={{ cursor: 'pointer', color: '#fff' }}>🗑️ Clear</span>}
-                                <button onClick={runCode} disabled={isLoading || !activeFileName}
-                                    style={{ padding: '2px 10px', background: isLoading ? '#555' : '#0e639c', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '11px' }}>
-                                    {isLoading ? "Running..." : "▶ Run"}
-                                </button>
+                    <div className="bottomWorkbench">
+                        <div className="outputPanel">
+                            <div className="panelTitlebar">
+                                <span>OUTPUT</span>
+                                <div className="panelActions">
+                                    {output && <button type="button" className="panelButtonGhost" onClick={() => setOutput("")}>Clear</button>}
+                                    <button type="button" className="panelButtonPrimary" onClick={runCode} disabled={isLoading || !activeFileName}>
+                                        {isLoading ? "Running..." : "Run"}
+                                    </button>
+                                </div>
                             </div>
+                            <pre className={`outputStream ${isError ? 'is-error' : ''}`}>
+                                {output || <span>Output window...</span>}
+                            </pre>
                         </div>
-                        <pre style={{ flex: 1, padding: '10px 15px', margin: 0, fontFamily: "'Fira Code', monospace", fontSize: '14px', color: isError ? '#f87171' : '#a7f3d0', whiteSpace: 'pre-wrap', overflowY: 'auto' }}>
-                            {output || <span style={{ color: '#555', fontStyle: 'italic' }}>Output window...</span>}
-                        </pre>
+
+                        <div className="terminalPanel">
+                            <div className="panelTitlebar">
+                                <span>TERMINAL</span>
+                            </div>
+                            {socketRef.current ? (
+                                <Terminal socket={socketRef.current} roomId={roomId} />
+                            ) : (
+                                <div className="terminalPlaceholder">Connecting terminal...</div>
+                            )}
+                        </div>
                     </div>
                 </div>
             </div>

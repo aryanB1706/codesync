@@ -2,6 +2,26 @@ const userSocketMap = {}; // Ab isme { username, location } store hoga
 const roomLocks = {};     // Structure: { roomId: { "src/App.js": { socketId, username } } }
 const roomTyping = {};    // Structure: { roomId: { "src/App.js": { socketId, username } } }
 const { recordEvent, getTape, reconstructStateAt } = require('../sessionTape');
+const {
+    applyServerOperation,
+    deleteFileState,
+    getFileState,
+    getRoomSnapshot,
+    setFileText,
+} = require('../ot');
+const {
+    closeTerminalIfRoomEmpty,
+    ensureTerminal,
+    resizeTerminal,
+    writeToTerminal,
+} = require('../terminalManager');
+const {
+    closeWorkspaceIfRoomEmpty,
+    deleteWorkspacePath,
+    emitWorkspaceSync,
+    ensureWorkspaceWatcher,
+    writeWorkspaceFile,
+} = require('../workspaceManager');
 
 const getAllConnectedClients = (io, roomId) => {
     return Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
@@ -32,6 +52,9 @@ module.exports = (io, socket) => {
         if (!roomTyping[roomId]) {
             roomTyping[roomId] = {};
         }
+        ensureWorkspaceWatcher(io, roomId);
+        emitWorkspaceSync(io, roomId);
+        ensureTerminal(io, roomId);
 
         const clients = getAllConnectedClients(io, roomId);
         
@@ -42,6 +65,7 @@ module.exports = (io, socket) => {
             socketId: socket.id,
             locks: roomLocks[roomId] // Naya user aate hi usko pata chale kaunsi file locked hai
         });
+        socket.emit('ot_state', { files: getRoomSnapshot(roomId) });
     });
 
     // === NEW: FILE LOCKING MECHANISM ===
@@ -97,7 +121,76 @@ module.exports = (io, socket) => {
             username: getUsername(),
         });
         io.to(roomId).emit('tape-new-event', tapeEvent);
+        setFileText(roomId, fileName, code || '');
+        writeWorkspaceFile(roomId, fileName, code || '');
         socket.in(roomId).emit('code_change', { code, fileName }); 
+    });
+
+    socket.on('ot_operation', ({ roomId, fileName, operation, lastKnownRevision, baseText }) => {
+        if (!roomId || !fileName || !operation) {
+            socket.emit('ot_rejected', { fileName, reason: 'Malformed OT operation.' });
+            return;
+        }
+
+        const fileLock = roomLocks[roomId]?.[fileName];
+        if (fileLock) {
+            socket.emit('ot_rejected', {
+                fileName,
+                reason: 'File is locked; OT operations are disabled for locked files.',
+                lock: fileLock,
+            });
+            socket.emit('locks_updated', roomLocks[roomId] || {});
+            return;
+        }
+
+        const normalizedOperation = {
+            ...operation,
+            clientId: socket.id,
+            username: getUsername(),
+        };
+
+        try {
+            const result = applyServerOperation({
+                roomId,
+                fileName,
+                operation: normalizedOperation,
+                lastKnownRevision,
+                initialText: baseText || '',
+            });
+
+            const tapeEvent = recordEvent(roomId, {
+                type: 'FILE_EDIT',
+                filePath: fileName,
+                fullContent: result.text,
+                userId: socket.id,
+                username: getUsername(),
+            });
+
+            socket.emit('ot_ack', {
+                fileName,
+                operationId: operation.operationId,
+                revision: result.revision,
+                operation: result.operation,
+                text: result.text,
+            });
+            socket.in(roomId).emit('ot_broadcast', {
+                fileName,
+                operation: result.operation,
+                revision: result.revision,
+            });
+            io.to(roomId).emit('tape-new-event', tapeEvent);
+            writeWorkspaceFile(roomId, fileName, result.text);
+        } catch (error) {
+            socket.emit('ot_rejected', {
+                fileName,
+                reason: error.message || 'Failed to apply OT operation.',
+                revision: getFileState(roomId, fileName, baseText || '').revisionCounter,
+            });
+        }
+    });
+
+    socket.on('ot_request_state', ({ roomId }) => {
+        socket.emit('ot_state', { files: getRoomSnapshot(roomId) });
     });
 
     socket.on('typing_start', ({ roomId, fileName }) => {
@@ -123,6 +216,8 @@ module.exports = (io, socket) => {
 
     // File Creation
     socket.on('file_created', ({ roomId, fileName, language, value }) => {
+        setFileText(roomId, fileName, value || '');
+        writeWorkspaceFile(roomId, fileName, value || '');
         const tapeEvent = recordEvent(roomId, {
             type: 'FILE_CREATE',
             filePath: fileName,
@@ -154,8 +249,15 @@ module.exports = (io, socket) => {
             userId: socket.id,
             username: getUsername(),
         });
+        deleteFileState(roomId, id);
+        deleteWorkspacePath(roomId, id);
         io.to(roomId).emit('tape-new-event', tapeEvent);
         socket.in(roomId).emit('file_deleted', { id }); 
+    });
+
+    socket.on('filesystem:refresh', ({ roomId }) => {
+        if (!socket.rooms.has(roomId)) return;
+        emitWorkspaceSync(io, roomId);
     });
 
     socket.on('request-tape', ({ roomId }) => {
@@ -165,6 +267,16 @@ module.exports = (io, socket) => {
     socket.on('tape-scrub', ({ roomId, eventIndex }) => {
         const reconstructedFiles = reconstructStateAt(roomId, eventIndex);
         socket.emit('tape-state-at', { eventIndex, files: reconstructedFiles });
+    });
+
+    socket.on('terminal:write', ({ roomId, data }) => {
+        if (!socket.rooms.has(roomId)) return;
+        writeToTerminal(io, roomId, data);
+    });
+
+    socket.on('terminal:resize', ({ roomId, cols, rows }) => {
+        if (!socket.rooms.has(roomId)) return;
+        resizeTerminal(io, roomId, cols, rows);
     });
 
     // Disconnect
@@ -193,5 +305,14 @@ module.exports = (io, socket) => {
 
         delete userSocketMap[socket.id];
         socket.leave();
+    });
+
+    socket.on('disconnect', () => {
+        Object.keys(roomLocks).forEach((roomId) => {
+            closeTerminalIfRoomEmpty(io, roomId);
+            closeWorkspaceIfRoomEmpty(io, roomId).catch((error) => {
+                console.error('Failed to close workspace watcher:', error);
+            });
+        });
     });
 };
